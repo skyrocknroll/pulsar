@@ -29,17 +29,24 @@ import static org.mockito.Mockito.verify;
 
 import org.apache.distributedlog.api.namespace.Namespace;
 import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.functions.auth.FunctionAuthProvider;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.Function.PackageLocationMetaData;
 import org.apache.pulsar.functions.runtime.Runtime;
 import org.apache.pulsar.functions.runtime.RuntimeFactory;
 import org.apache.pulsar.functions.runtime.RuntimeSpawner;
-import org.apache.pulsar.functions.runtime.ThreadRuntimeFactory;
+import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactoryConfig;
+import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory;
 import org.testng.annotations.Test;
+
+import java.util.Map;
+import java.util.Optional;
+
 import static org.apache.pulsar.common.functions.Utils.FILE;
-import static org.testng.Assert.*;
-import static org.testng.AssertJUnit.assertFalse;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
+import static org.testng.AssertJUnit.fail;
 
 /**
  * Unit test of {@link FunctionActioner}.
@@ -56,8 +63,10 @@ public class FunctionActionerTest {
 
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
-        workerConfig.setThreadContainerFactory(new WorkerConfig.ThreadContainerFactory().setThreadGroupName("test"));
-        workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
+        workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
+        workerConfig.setFunctionRuntimeFactoryConfigs(
+                ObjectMapperFactory.getThreadLocal().convertValue(
+                        new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));        workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setFunctionAssignmentTopicName("assignments");
 
@@ -84,7 +93,7 @@ public class FunctionActionerTest {
         // actioner should try to download file from bk-dlogNamespace and fails with exception
         try {
             actioner.startFunction(functionRuntimeInfo);
-            assertFalse(true);
+            fail();
         } catch (IllegalStateException ex) {
             assertEquals(ex.getMessage(), "StartupException");
         }
@@ -95,7 +104,10 @@ public class FunctionActionerTest {
 
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
-        workerConfig.setThreadContainerFactory(new WorkerConfig.ThreadContainerFactory().setThreadGroupName("test"));
+        workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
+        workerConfig.setFunctionRuntimeFactoryConfigs(
+                ObjectMapperFactory.getThreadLocal().convertValue(
+                        new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setFunctionAssignmentTopicName("assignments");
@@ -144,7 +156,7 @@ public class FunctionActionerTest {
 
         try {
             actioner.startFunction(functionRuntimeInfo);
-            assertFalse(true);
+            fail();
         } catch (IllegalStateException ex) {
             assertEquals(ex.getMessage(), "StartupException");
         }
@@ -154,7 +166,10 @@ public class FunctionActionerTest {
     public void testFunctionAuthDisabled() throws Exception {
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
-        workerConfig.setThreadContainerFactory(new WorkerConfig.ThreadContainerFactory().setThreadGroupName("test"));
+        workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
+        workerConfig.setFunctionRuntimeFactoryConfigs(
+                ObjectMapperFactory.getThreadLocal().convertValue(
+                        new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setFunctionAssignmentTopicName("assignments");
@@ -186,13 +201,13 @@ public class FunctionActionerTest {
 
         RuntimeSpawner runtimeSpawner = spy(actioner.getRuntimeSpawner(instance, "foo"));
 
-        assertTrue(runtimeSpawner.getInstanceConfig().getFunctionAuthenticationSpec() == null);
+        assertNull(runtimeSpawner.getInstanceConfig().getFunctionAuthenticationSpec());
 
         FunctionRuntimeInfo functionRuntimeInfo = mock(FunctionRuntimeInfo.class);
 
         RuntimeFactory runtimeFactory = mock(RuntimeFactory.class);
 
-        FunctionAuthProvider functionAuthProvider = mock(FunctionAuthProvider.class);
+        Optional<FunctionAuthProvider> functionAuthProvider = Optional.of(mock(FunctionAuthProvider.class));
         doReturn(functionAuthProvider).when(runtimeFactory).getAuthProvider();
 
         doReturn(runtimeFactory).when(runtimeSpawner).getRuntimeFactory();
@@ -202,7 +217,7 @@ public class FunctionActionerTest {
         actioner.terminateFunction(functionRuntimeInfo);
 
         // make sure cache
-        verify(functionAuthProvider, times(0)).cleanUpAuthData(any(), any(), any(), any());
+        verify(functionAuthProvider.get(), times(0)).cleanUpAuthData(any(), any());
     }
 
 }

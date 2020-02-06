@@ -18,7 +18,6 @@
  */
 package org.apache.pulsar.zookeeper;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.net.UnknownHostException;
@@ -28,18 +27,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.RackChangeNotifier;
-import org.apache.bookkeeper.client.RackawareEnsemblePlacementPolicyImpl;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.net.AbstractDNSToSwitchMapping;
+import org.apache.bookkeeper.net.BookieNode;
 import org.apache.bookkeeper.net.BookieSocketAddress;
-import org.apache.bookkeeper.net.NetworkTopology;
 import org.apache.bookkeeper.zookeeper.ZooKeeperClient;
 import org.apache.commons.configuration.Configuration;
 import org.apache.pulsar.common.policies.data.BookieInfo;
 import org.apache.pulsar.common.policies.data.BookiesRackConfiguration;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
-import org.apache.pulsar.zookeeper.ZooKeeperCache.Deserializer;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
@@ -55,7 +53,7 @@ public class ZkBookieRackAffinityMapping extends AbstractDNSToSwitchMapping
     public static final String BOOKIE_INFO_ROOT_PATH = "/bookies";
 
     private ZooKeeperDataCache<BookiesRackConfiguration> bookieMappingCache = null;
-    private RackawareEnsemblePlacementPolicyImpl rackawarePolicy = null;
+    private ITopologyAwareEnsemblePlacementPolicy<BookieNode> rackawarePolicy = null;
 
     private static final ObjectMapper jsonMapper = ObjectMapperFactory.create();
 
@@ -105,7 +103,8 @@ public class ZkBookieRackAffinityMapping extends AbstractDNSToSwitchMapping
                 try {
                     ZooKeeper zkClient = ZooKeeperClient.newBuilder().connectString(zkServers)
                             .sessionTimeoutMs(zkTimeout).build();
-                    zkCache = new ZooKeeperCache(zkClient, (int) TimeUnit.MILLISECONDS.toSeconds(zkTimeout)) {
+                    zkCache = new ZooKeeperCache("bookies-racks", zkClient,
+                            (int) TimeUnit.MILLISECONDS.toSeconds(zkTimeout)) {
                     };
                     conf.addProperty(ZooKeeperCache.ZK_CACHE_INSTANCE, zkCache);
                 } catch (Exception e) {
@@ -155,7 +154,9 @@ public class ZkBookieRackAffinityMapping extends AbstractDNSToSwitchMapping
             // Trigger load of z-node in case it didn't exist
             Optional<BookiesRackConfiguration> racks = bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH);
             if (!racks.isPresent()) {
-                return NetworkTopology.DEFAULT_RACK;
+                // since different placement policy will have different default rack,
+                // don't be smart here and just return null
+                return null;
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -170,7 +171,9 @@ public class ZkBookieRackAffinityMapping extends AbstractDNSToSwitchMapping
             }
             return rack;
         } else {
-            return NetworkTopology.DEFAULT_RACK;
+            // since different placement policy will have different default rack,
+            // don't be smart here and just return null
+            return null;
         }
     }
 
@@ -182,6 +185,11 @@ public class ZkBookieRackAffinityMapping extends AbstractDNSToSwitchMapping
     @Override
     public void reloadCachedMappings() {
         // no-op
+    }
+
+    @Override
+    public boolean useHostName() {
+        return false;
     }
 
     @Override
@@ -203,8 +211,7 @@ public class ZkBookieRackAffinityMapping extends AbstractDNSToSwitchMapping
     }
 
     @Override
-    public void registerRackChangeListener(RackawareEnsemblePlacementPolicyImpl rackawarePolicy) {
+    public void registerRackChangeListener(ITopologyAwareEnsemblePlacementPolicy<BookieNode> rackawarePolicy) {
         this.rackawarePolicy = rackawarePolicy;
-
     }
 }

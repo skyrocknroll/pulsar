@@ -50,8 +50,16 @@ class ReflectionUtils {
     @SuppressWarnings("unchecked")
     static <T> Class<T> newClassInstance(String className) {
         try {
-            return (Class<T>) DefaultImplementation.class.getClassLoader().loadClass(className);
-        } catch (ClassNotFoundException e) {
+            try {
+                // when the API is loaded in the same classloader as the impl
+                return (Class<T>) DefaultImplementation.class.getClassLoader().loadClass(className);
+            } catch (Exception e) {
+                // when the API is loaded in a separate classloader as the impl
+                // the classloader that loaded the impl needs to be a child classloader of the classloader
+                // that loaded the API
+                return (Class<T>) Thread.currentThread().getContextClassLoader().loadClass(className);
+            }
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new RuntimeException(e);
         }
     }

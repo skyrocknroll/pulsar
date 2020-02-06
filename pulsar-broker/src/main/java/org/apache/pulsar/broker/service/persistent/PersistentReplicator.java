@@ -26,6 +26,7 @@ import io.netty.util.Recycler.Handle;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
@@ -45,9 +46,11 @@ import org.apache.bookkeeper.mledger.util.Rate;
 import org.apache.pulsar.broker.service.AbstractReplicator;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.BrokerServiceException.NamingException;
+import org.apache.pulsar.broker.service.BrokerServiceException.TopicBusyException;
 import org.apache.pulsar.broker.service.Replicator;
 import org.apache.pulsar.broker.service.persistent.DispatchRateLimiter.Type;
 import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.impl.Backoff;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
@@ -375,10 +378,10 @@ public class PersistentReplicator extends AbstractReplicator implements Replicat
 
         @Override
         public void sendComplete(Exception exception) {
-            if (exception != null) {
+            if (exception != null && !(exception instanceof PulsarClientException.InvalidMessageException)) {
                 log.error("[{}][{} -> {}] Error producing on remote broker", replicator.topicName,
                         replicator.localCluster, replicator.remoteCluster, exception);
-                // cursor shoud be rewinded since it was incremented when readMoreEntries
+                // cursor should be rewinded since it was incremented when readMoreEntries
                 replicator.cursor.rewind();
             } else {
                 if (log.isDebugEnabled()) {
@@ -678,6 +681,33 @@ public class PersistentReplicator extends AbstractReplicator implements Replicat
         default:
             // Do nothing
         }
+    }
+
+    @Override
+    public CompletableFuture<Void> disconnect() {
+        return disconnect(false);
+    }
+
+    @Override
+    public synchronized CompletableFuture<Void> disconnect(boolean failIfHasBacklog) {
+        final CompletableFuture<Void> future = new CompletableFuture<>();
+
+        super.disconnect(failIfHasBacklog).thenRun(() -> {
+            if (dispatchRateLimiter.isPresent()) {
+                dispatchRateLimiter.get().close();
+            }
+            future.complete(null);
+        }).exceptionally(ex -> {
+            Throwable t = (ex instanceof CompletionException ? ex.getCause() : ex);
+            if (t instanceof TopicBusyException == false) {
+                log.error("[{}][{} -> {}] Failed to close dispatch rate limiter: {}", topicName, localCluster,
+                        remoteCluster, ex.getMessage());
+            }
+            future.completeExceptionally(t);
+            return null;
+        });
+
+        return future;
     }
 
     @Override

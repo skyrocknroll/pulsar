@@ -20,8 +20,10 @@ package org.apache.pulsar.broker.service;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -29,7 +31,6 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import org.apache.pulsar.broker.service.BrokerServiceException.ConsumerBusyException;
 import org.apache.pulsar.broker.service.BrokerServiceException.ServerMetadataException;
 import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.SubType;
-import org.apache.pulsar.utils.CopyOnWriteArrayList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,6 +41,8 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
             AtomicReferenceFieldUpdater.newUpdater(AbstractDispatcherSingleActiveConsumer.class, Consumer.class, "activeConsumer");
     private volatile Consumer activeConsumer = null;
     protected final CopyOnWriteArrayList<Consumer> consumers;
+    protected StickyKeyConsumerSelector stickyKeyConsumerSelector;
+    protected boolean isKeyHashRangeFiltered = false;
     protected CompletableFuture<Void> closeFuture = null;
     protected final int partitionIndex;
 
@@ -134,9 +137,10 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
 
     public synchronized void addConsumer(Consumer consumer) throws BrokerServiceException {
         if (IS_CLOSED_UPDATER.get(this) == TRUE) {
-            log.warn("[{}] Dispatcher is already closed. Closing consumer ", this.topicName, consumer);
+            log.warn("[{}] Dispatcher is already closed. Closing consumer {}", this.topicName, consumer);
             consumer.disconnect();
         }
+
         if (subscriptionType == SubType.Exclusive && !consumers.isEmpty()) {
             throw new ConsumerBusyException("Exclusive consumer is already connected");
         }
@@ -152,6 +156,17 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
         }
 
         consumers.add(consumer);
+
+        if (subscriptionType == SubType.Exclusive
+                && consumer.getKeySharedMeta() != null
+                && consumer.getKeySharedMeta().getHashRangesList() != null
+                && consumer.getKeySharedMeta().getHashRangesList().size() > 0) {
+            stickyKeyConsumerSelector = new HashRangeExclusiveStickyKeyConsumerSelector();
+            stickyKeyConsumerSelector.addConsumer(consumer);
+            isKeyHashRangeFiltered = true;
+        } else {
+            isKeyHashRangeFiltered = false;
+        }
 
         if (!pickAndScheduleActiveConsumer()) {
             // the active consumer is not changed
@@ -207,17 +222,21 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
         return disconnectAllConsumers();
     }
 
+    public boolean isClosed() {
+        return isClosed == TRUE;
+    }
+
     /**
      * Disconnect all consumers on this dispatcher (server side close). This triggers channelInactive on the inbound
      * handler which calls dispatcher.removeConsumer(), where the closeFuture is completed
      *
      * @return
      */
-    public synchronized CompletableFuture<Void> disconnectAllConsumers() {
+    public synchronized CompletableFuture<Void> disconnectAllConsumers(boolean isResetCursor) {
         closeFuture = new CompletableFuture<>();
 
         if (!consumers.isEmpty()) {
-            consumers.forEach(Consumer::disconnect);
+            consumers.forEach(consumer -> consumer.disconnect(isResetCursor));
             cancelPendingRead();
         } else {
             // no consumer connected, complete disconnect immediately
@@ -226,7 +245,13 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
         return closeFuture;
     }
 
+    @Override
+    public synchronized void resetCloseFuture() {
+        closeFuture = null;
+    }
+
     public void reset() {
+        resetCloseFuture();
         IS_CLOSED_UPDATER.set(this, FALSE);
     }
 
@@ -238,7 +263,8 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
         return ACTIVE_CONSUMER_UPDATER.get(this);
     }
 
-    public CopyOnWriteArrayList<Consumer> getConsumers() {
+    @Override
+    public List<Consumer> getConsumers() {
         return consumers;
     }
 

@@ -52,7 +52,7 @@ public class FunctionConfigUtils {
             if (classLoader != null) {
                 try {
                     typeArgs = FunctionCommon.getFunctionTypes(functionConfig, classLoader);
-                } catch (ClassNotFoundException e) {
+                } catch (ClassNotFoundException | NoClassDefFoundError e) {
                     throw new IllegalArgumentException(
                             String.format("Function class %s must be in class path", functionConfig.getClassName()), e);
                 }
@@ -234,6 +234,10 @@ public class FunctionConfigUtils {
 
         functionDetailsBuilder.setComponentType(FunctionDetails.ComponentType.FUNCTION);
 
+        if (!StringUtils.isEmpty(functionConfig.getCustomRuntimeOptions())) {
+            functionDetailsBuilder.setCustomRuntimeOptions(functionConfig.getCustomRuntimeOptions());
+        }
+
         return functionDetailsBuilder.build();
     }
 
@@ -334,6 +338,10 @@ public class FunctionConfigUtils {
             functionConfig.setRuntimeFlags(functionDetails.getRuntimeFlags());
         }
 
+        if (!isEmpty(functionDetails.getCustomRuntimeOptions())) {
+            functionConfig.setCustomRuntimeOptions(functionDetails.getCustomRuntimeOptions());
+        }
+
         return functionConfig;
     }
 
@@ -369,10 +377,24 @@ public class FunctionConfigUtils {
 
     private static void doJavaChecks(FunctionConfig functionConfig, ClassLoader clsLoader) {
 
+        try {
+            Class functionClass = clsLoader.loadClass(functionConfig.getClassName());
+
+            if (!org.apache.pulsar.functions.api.Function.class.isAssignableFrom(functionClass)
+                    && !java.util.function.Function.class.isAssignableFrom(functionClass)) {
+                throw new IllegalArgumentException(
+                        String.format("Function class %s does not implement the correct interface",
+                                functionClass.getName()));
+            }
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
+            throw new IllegalArgumentException(
+                    String.format("Function class %s must be in class path", functionConfig.getClassName()), e);
+        }
+
         Class<?>[] typeArgs;
         try {
             typeArgs = FunctionCommon.getFunctionTypes(functionConfig, clsLoader);
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new IllegalArgumentException(
                     String.format("Function class %s must be in class path", functionConfig.getClassName()), e);
         }
@@ -632,9 +654,11 @@ public class FunctionConfigUtils {
         } else if (functionConfig.getRuntime() == FunctionConfig.Runtime.GO) {
             doGolangChecks(functionConfig);
             return null;
-        } else {
+        } else if (functionConfig.getRuntime() == FunctionConfig.Runtime.PYTHON){
             doPythonChecks(functionConfig);
             return null;
+        } else {
+            throw new IllegalArgumentException("Function language runtime is either not set or cannot be determined");
         }
     }
 
@@ -758,6 +782,9 @@ public class FunctionConfigUtils {
         }
         if (!StringUtils.isEmpty(newConfig.getRuntimeFlags())) {
             mergedConfig.setRuntimeFlags(newConfig.getRuntimeFlags());
+        }
+        if (!StringUtils.isEmpty(newConfig.getCustomRuntimeOptions())) {
+            mergedConfig.setCustomRuntimeOptions(newConfig.getCustomRuntimeOptions());
         }
         return mergedConfig;
     }

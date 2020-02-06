@@ -18,11 +18,6 @@
  */
 package org.apache.pulsar.broker.loadbalance;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Charsets;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import static org.apache.pulsar.broker.cache.ConfigurationCacheService.POLICIES;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -30,11 +25,18 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Charsets;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+
 import java.lang.reflect.Field;
-import java.net.InetAddress;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -51,8 +53,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.bookkeeper.test.PortManager;
 import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.admin.AdminResource;
@@ -107,8 +109,6 @@ public class LoadBalancerTest {
 
     private static final int MAX_RETRIES = 10;
 
-    private final int ZOOKEEPER_PORT = PortManager.nextFreePort();
-
     private static final int BROKER_COUNT = 5;
     private int[] brokerWebServicePorts = new int[BROKER_COUNT];
     private int[] brokerNativeBrokerPorts = new int[BROKER_COUNT];
@@ -120,7 +120,7 @@ public class LoadBalancerTest {
     @BeforeMethod
     void setup() throws Exception {
         // Start local bookkeeper ensemble
-        bkEnsemble = new LocalBookkeeperEnsemble(3, ZOOKEEPER_PORT, () -> PortManager.nextFreePort());
+        bkEnsemble = new LocalBookkeeperEnsemble(3, 0, () -> 0);
         bkEnsemble.start();
         ZkUtils.createFullPathOptimistic(bkEnsemble.getZkClient(),
                 SimpleLoadManagerImpl.LOADBALANCER_DYNAMIC_SETTING_STRATEGY_ZPATH,
@@ -130,26 +130,30 @@ public class LoadBalancerTest {
         final String localhost = "localhost";
         // start brokers
         for (int i = 0; i < BROKER_COUNT; i++) {
-            brokerWebServicePorts[i] = PortManager.nextFreePort();
-            brokerNativeBrokerPorts[i] = PortManager.nextFreePort();
+
 
             ServiceConfiguration config = new ServiceConfiguration();
             config.setBrokerServicePort(Optional.ofNullable(brokerNativeBrokerPorts[i]));
             config.setClusterName("use");
             config.setAdvertisedAddress(localhost);
             config.setAdvertisedAddress("localhost");
-            config.setWebServicePort(Optional.ofNullable(brokerWebServicePorts[i]));
-            config.setZookeeperServers("127.0.0.1" + ":" + ZOOKEEPER_PORT);
-            config.setBrokerServicePort(Optional.ofNullable(brokerNativeBrokerPorts[i]));
+            config.setWebServicePort(Optional.of(0));
+            config.setBrokerServicePortTls(Optional.of(0));
+            config.setWebServicePortTls(Optional.of(0));
+            config.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
+            config.setBrokerServicePort(Optional.of(0));
             config.setLoadManagerClassName(SimpleLoadManagerImpl.class.getName());
             config.setAdvertisedAddress(localhost+i);
             config.setLoadBalancerEnabled(false);
 
             pulsarServices[i] = new PulsarService(config);
+            pulsarServices[i].setShutdownService(new NoOpShutdownService());
             pulsarServices[i].start();
+            brokerWebServicePorts[i] = pulsarServices[i].getListenPortHTTP().get();
+            brokerNativeBrokerPorts[i] = pulsarServices[i].getBrokerListenPort().get();
 
             brokerUrls[i] = new URL("http://127.0.0.1" + ":" + brokerWebServicePorts[i]);
-            lookupAddresses[i] = pulsarServices[i].getAdvertisedAddress() + ":" + config.getWebServicePort().get();
+            lookupAddresses[i] = pulsarServices[i].getAdvertisedAddress() + ":" + pulsarServices[i].getListenPortHTTP().get();
             pulsarAdmins[i] = PulsarAdmin.builder().serviceHttpUrl(brokerUrls[i].toString()).build();
         }
 
@@ -176,7 +180,7 @@ public class LoadBalancerTest {
         int loopCount = 0;
 
         while (loopCount < MAX_RETRIES) {
-            Thread.sleep(1000 * 1);
+            Thread.sleep(1000);
             // Check if the new leader is elected. If yes, break without incrementing the loopCount
             newLeader = les.getCurrentLeader();
             if (newLeader.equals(oldLeader) == false) {
@@ -227,7 +231,7 @@ public class LoadBalancerTest {
                 TopicName topicName = TopicName.get("persistent://pulsar/use/primary-ns/test-topic");
                 ResourceUnit found = pulsarServices[i].getLoadManager().get()
                         .getLeastLoaded(pulsarServices[i].getNamespaceService().getBundle(topicName)).get();
-                assertTrue(found != null);
+                assertNotNull(found);
             }
         } catch (InterruptedException | KeeperException e) {
             fail("Unable to read the data from Zookeeper - [{}]", e);
@@ -308,7 +312,7 @@ public class LoadBalancerTest {
     /*
      * Pre-publish load report to ZK, each broker has: - Difference memory capacity, for the first 3 brokers memory is
      * bottleneck, for the 4/5th brokers CPU become bottleneck since memory is big enough - non-bundles assigned so all
-     * idle resources are avaiable for new bundle Check the broker rankings are the load percentage of each broker.
+     * idle resources are available for new bundle Check the broker rankings are the load percentage of each broker.
      */
     @Test
     public void testBrokerRanking() throws Exception {
@@ -398,7 +402,7 @@ public class LoadBalancerTest {
             printSortedRanking(sortedRanking);
         }
 
-        // check owner of new destiations and verify that the distribution is roughly
+        // check owner of new destinations and verify that the distribution is roughly
         // consistent (variation < 10%) with the broker capacity:
         int totalNamespaces = 250;
         int[] expectedAssignments = new int[] { 17, 34, 51, 68, 85 };
@@ -812,7 +816,7 @@ public class LoadBalancerTest {
         LocalZooKeeperCache originalLZK2 = (LocalZooKeeperCache) zkCacheField.get(pulsarServices[1]);
         zkCacheField.set(pulsarServices[0], mockCache);
         zkCacheField.set(pulsarServices[1], mockCache);
-        LoadManager loadManager = new SimpleLoadManagerImpl(pulsarServices[0]);
+        SimpleLoadManagerImpl loadManager = new SimpleLoadManagerImpl(pulsarServices[0]);
 
         // TODO move to its own test
         PulsarResourceDescription rd = new PulsarResourceDescription();
@@ -832,12 +836,12 @@ public class LoadBalancerTest {
         sortedRankings.setAccessible(true);
         sortedRankings.set(loadManager, sortedRankingsInstance);
 
-        ResourceUnit found = ((SimpleLoadManagerImpl) loadManager)
-                .getLeastLoaded(NamespaceName.get("pulsar/use/primary-ns.10")).get();
+        ResourceUnit found = loadManager.getLeastLoaded(NamespaceName.get("pulsar/use/primary-ns.10")).get();
         assertEquals("http://prod1-broker1.messaging.use.example.com:8080", found.getResourceId());
 
         zkCacheField.set(pulsarServices[0], originalLZK1);
         zkCacheField.set(pulsarServices[1], originalLZK2);
+        loadManager.stop();
     }
 
     /*
@@ -962,8 +966,8 @@ public class LoadBalancerTest {
         }
         String inactiveBroker = "prod1-broker3.messaging.use.example.com:8080";
         // check owner list contains only two entries, broker-3 should not be in
-        assertTrue(namespaceOwner.size() == 2);
-        assertTrue(!namespaceOwner.containsKey(inactiveBroker));
+        assertEquals(namespaceOwner.size(), 2);
+        assertFalse(namespaceOwner.containsKey(inactiveBroker));
     }
 
     @Test(enabled = false)

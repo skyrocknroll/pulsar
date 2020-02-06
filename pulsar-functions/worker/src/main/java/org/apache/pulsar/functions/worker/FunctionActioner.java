@@ -18,14 +18,10 @@
  */
 package org.apache.pulsar.functions.worker;
 
-import com.google.common.io.MoreFiles;	
+import com.google.common.io.MoreFiles;
 import com.google.common.io.RecursiveDeleteOption;
 
 import lombok.Data;
-import lombok.EqualsAndHashCode;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.distributedlog.api.namespace.Namespace;
@@ -35,6 +31,7 @@ import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.nar.NarClassLoader;
 import org.apache.pulsar.common.policies.data.SubscriptionStats;
 import org.apache.pulsar.common.policies.data.TopicStats;
+import org.apache.pulsar.functions.auth.FunctionAuthProvider;
 import org.apache.pulsar.functions.instance.InstanceConfig;
 import org.apache.pulsar.functions.instance.InstanceUtils;
 import org.apache.pulsar.functions.proto.Function;
@@ -73,10 +70,6 @@ import static org.apache.pulsar.functions.utils.FunctionCommon.getSinkType;
 import static org.apache.pulsar.functions.utils.FunctionCommon.getSourceType;
 
 @Data
-@Setter
-@Getter
-@EqualsAndHashCode
-@ToString
 @Slf4j
 public class FunctionActioner {
 
@@ -138,14 +131,12 @@ public class FunctionActioner {
             functionRuntimeInfo.setRuntimeSpawner(runtimeSpawner);
 
             runtimeSpawner.start();
-            return;
         } catch (Exception ex) {
             FunctionDetails details = functionRuntimeInfo.getFunctionInstance()
                     .getFunctionMetaData().getFunctionDetails();
             log.info("{}/{}/{} Error starting function", details.getTenant(), details.getNamespace(),
                     details.getName(), ex);
             functionRuntimeInfo.setStartupException(ex);
-            return;
         }
     }
 
@@ -173,7 +164,6 @@ public class FunctionActioner {
 
         return runtimeSpawner;
     }
-
 
     InstanceConfig createInstanceConfig(FunctionDetails functionDetails, Function.FunctionAuthenticationSpec
             functionAuthSpec, int instanceId, String clusterName) {
@@ -219,10 +209,14 @@ public class FunctionActioner {
         if(downloadFromHttp) {
             FunctionCommon.downloadFromHttpUrl(pkgLocationPath, tempPkgFile);
         } else {
+            FileOutputStream tempPkgFos = new FileOutputStream(tempPkgFile);
             WorkerUtils.downloadFromBookkeeper(
                     dlogNamespace,
-                    new FileOutputStream(tempPkgFile),
+                    tempPkgFos,
                     pkgLocationPath);
+            if (tempPkgFos != null) {
+                tempPkgFos.close();
+            }
         }
 
         try {
@@ -241,6 +235,11 @@ public class FunctionActioner {
             }
         } finally {
             tempPkgFile.delete();
+        }
+
+        if(details.getRuntime() == Function.FunctionDetails.Runtime.GO && !pkgFile.canExecute()) {
+            pkgFile.setExecutable(true);
+            log.info("Golang function package file {} is set to executable", pkgFile);
         }
     }
 
@@ -281,25 +280,28 @@ public class FunctionActioner {
         FunctionDetails details = functionRuntimeInfo.getFunctionInstance().getFunctionMetaData().getFunctionDetails();
         String fqfn = FunctionCommon.getFullyQualifiedName(details);
         log.info("{}-{} Terminating function...", fqfn,functionRuntimeInfo.getFunctionInstance().getInstanceId());
+        FunctionDetails funcDetails = functionRuntimeInfo.getFunctionInstance().getFunctionMetaData().getFunctionDetails();
 
         if (functionRuntimeInfo.getRuntimeSpawner() != null) {
             functionRuntimeInfo.getRuntimeSpawner().close();
 
             // cleanup any auth data cached
             if (workerConfig.isAuthenticationEnabled()) {
-                try {
-                    log.info("{}-{} Cleaning up authentication data for function...", fqfn,functionRuntimeInfo.getFunctionInstance().getInstanceId());
-                    functionRuntimeInfo.getRuntimeSpawner()
-                            .getRuntimeFactory().getAuthProvider()
-                            .cleanUpAuthData(
-                                    details.getTenant(), details.getNamespace(), details.getName(),
-                                    Optional.ofNullable(getFunctionAuthData(
-                                            Optional.ofNullable(
-                                                    functionRuntimeInfo.getRuntimeSpawner().getInstanceConfig().getFunctionAuthenticationSpec()))));
+                functionRuntimeInfo.getRuntimeSpawner()
+                        .getRuntimeFactory().getAuthProvider().ifPresent(functionAuthProvider -> {
+                            try {
+                                log.info("{}-{} Cleaning up authentication data for function...", fqfn,functionRuntimeInfo.getFunctionInstance().getInstanceId());
+                                functionAuthProvider
+                                        .cleanUpAuthData(
+                                                details,
+                                                Optional.ofNullable(getFunctionAuthData(
+                                                        Optional.ofNullable(
+                                                                functionRuntimeInfo.getRuntimeSpawner().getInstanceConfig().getFunctionAuthenticationSpec()))));
 
-                } catch (Exception e) {
-                    log.error("Failed to cleanup auth data for function: {}", fqfn, e);
-                }
+                            } catch (Exception e) {
+                                log.error("Failed to cleanup auth data for function: {}", fqfn, e);
+                            }
+                        });
             }
             functionRuntimeInfo.setRuntimeSpawner(null);
         }

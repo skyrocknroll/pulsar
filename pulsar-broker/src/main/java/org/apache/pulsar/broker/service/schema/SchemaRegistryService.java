@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 public interface SchemaRegistryService extends SchemaRegistry {
     String CreateMethodName = "create";
     Logger log = LoggerFactory.getLogger(SchemaRegistryService.class);
+    long NO_SCHEMA_VERSION = -1L;
 
     static Map<SchemaType, SchemaCompatibilityCheck> getCheckers(Set<String> checkerClasses) throws Exception {
         Map<SchemaType, SchemaCompatibilityCheck> checkers = Maps.newHashMap();
@@ -62,7 +63,7 @@ public interface SchemaRegistryService extends SchemaRegistry {
             return SchemaRegistryServiceWithSchemaDataValidator.of(
                 new SchemaRegistryServiceImpl(schemaStorage, checkers));
         } catch (Exception e) {
-            log.warn("Unable to create schema registry storage, defaulting to empty storage: {}", e);
+            log.warn("Unable to create schema registry storage, defaulting to empty storage", e);
         }
         return new DefaultSchemaRegistryService();
     }

@@ -92,7 +92,7 @@ public class BrokersBase extends AdminResource {
             // Add Native brokers
             return pulsar().getLocalZkCache().getChildren(LoadManager.LOADBALANCE_BROKERS_ROOT);
         } catch (Exception e) {
-            LOG.error(String.format("[%s] Failed to get active broker list: cluster=%s", clientAppId(), cluster), e);
+            LOG.error("[{}] Failed to get active broker list: cluster={}", clientAppId(), cluster, e);
             throw new RestException(e);
         }
     }
@@ -103,7 +103,7 @@ public class BrokersBase extends AdminResource {
     @ApiResponses(value = {
         @ApiResponse(code = 403, message = "Don't have admin permission"),
         @ApiResponse(code = 404, message = "Cluster doesn't exist") })
-    public Map<String, NamespaceOwnershipStatus> getOwnedNamespaes(@PathParam("clusterName") String cluster,
+    public Map<String, NamespaceOwnershipStatus> getOwnedNamespaces(@PathParam("clusterName") String cluster,
             @PathParam("broker-webserviceurl") String broker) throws Exception {
         validateSuperUserAccess();
         validateClusterOwnership(cluster);
@@ -262,6 +262,13 @@ public class BrokersBase extends AdminResource {
         PulsarClient client = pulsar().getClient();
 
         String messageStr = UUID.randomUUID().toString();
+        // create non-partitioned topic manually
+        try {
+            pulsar().getBrokerService().getTopic(topic, true).get();
+        } catch (Exception e) {
+            asyncResponse.resume(new RestException(e));
+            return;
+        }
         CompletableFuture<Producer<String>> producerFuture =
             client.newProducer(Schema.STRING).topic(topic).createAsync();
         CompletableFuture<Reader<String>> readerFuture = client.newReader(Schema.STRING)

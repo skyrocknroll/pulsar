@@ -20,19 +20,21 @@ package org.apache.pulsar.common.io;
 
 import java.util.Collection;
 import java.util.Map;
-import java.util.TreeMap;
 
-import lombok.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.common.functions.ConsumerConfig;
 import org.apache.pulsar.common.functions.FunctionConfig;
 import org.apache.pulsar.common.functions.Resources;
 
-@Getter
-@Setter
+/**
+ * Configuration of Pulsar Sink.
+ */
 @Data
-@EqualsAndHashCode
-@ToString
-@Builder(toBuilder=true)
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class SinkConfig {
@@ -42,6 +44,7 @@ public class SinkConfig {
     private String name;
     private String className;
     private String sourceSubscriptionName;
+    private SubscriptionInitialPosition sourceSubscriptionPosition;
 
     private Collection<String> inputs;
 
@@ -72,4 +75,8 @@ public class SinkConfig {
 
     // Any flags that you want to pass to the runtime.
     private String runtimeFlags;
+    // This is an arbitrary string that can be interpreted by the function runtime
+    // to change behavior at runtime. Currently, this primarily used by the KubernetesManifestCustomizer
+    // interface
+    private String customRuntimeOptions;
 }

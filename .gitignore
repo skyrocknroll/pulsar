@@ -5,6 +5,7 @@ test-results
 dependency-reduced-pom.xml
 logs
 /data
+pulsar-broker/data/
 pulsar-broker/tmp.*
 pulsar-broker/src/test/resources/log4j2.yaml
 pulsar-functions/worker/test-tenant/
@@ -76,6 +77,9 @@ docker.debug-info
 
 **/website/i18n/*
 **/website/translated_docs*
+**/website/brodocs/index.html
+**/website/brodocs/navData.js
+**/website/brodocs/documents/*.md
 
 # Avro
 examples/flink/src/main/java/org/apache/flink/avro/generated

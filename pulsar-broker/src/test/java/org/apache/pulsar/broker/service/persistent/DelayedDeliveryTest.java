@@ -19,6 +19,7 @@
 package org.apache.pulsar.broker.service.persistent;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 import java.util.Set;
@@ -88,7 +89,7 @@ public class DelayedDeliveryTest extends ProducerConsumerBase {
         // Failover consumer will receive the messages immediately while
         // the shared consumer will get them after the delay
         Message<String> msg = sharedConsumer.receive(100, TimeUnit.MILLISECONDS);
-        assertEquals(msg, null);
+        assertNull(msg);
 
         for (int i = 0; i < 10; i++) {
             msg = failoverConsumer.receive(100, TimeUnit.MILLISECONDS);
@@ -194,7 +195,7 @@ public class DelayedDeliveryTest extends ProducerConsumerBase {
         }
 
         Message<String> msg = sharedConsumer.receive(100, TimeUnit.MILLISECONDS);
-        assertEquals(msg, null);
+        assertNull(msg);
 
         Set<String> receivedMsgs = new TreeSet<>();
         for (int i = 0; i < 20; i++) {
@@ -206,5 +207,68 @@ public class DelayedDeliveryTest extends ProducerConsumerBase {
         for (int i = 0; i < 10; i++) {
             assertTrue(receivedMsgs.contains("msg-" + i));
         }
+    }
+
+    @Test
+    public void testDelayedDeliveryWithMultipleConcurrentReadEntries()
+            throws Exception {
+        String topic = "persistent://public/default/testDelayedDelivery-" + System.nanoTime();
+
+        @Cleanup
+        Consumer<String> consumer = pulsarClient.newConsumer(Schema.STRING)
+                .topic(topic)
+                .subscriptionName("shared-sub")
+                .subscriptionType(SubscriptionType.Shared)
+                .receiverQueueSize(1) // Use small prefecthing to simulate the multiple read batches
+                .subscribe();
+
+        // Simulate race condition with high frequency of calls to dispatcher.readMoreEntries()
+        PersistentDispatcherMultipleConsumers d = (PersistentDispatcherMultipleConsumers) ((PersistentTopic) pulsar
+                .getBrokerService().getTopicReference(topic).get()).getSubscription("shared-sub").getDispatcher();
+        Thread t = new Thread(() -> {
+            while (true) {
+                synchronized (d) {
+                    d.readMoreEntries();
+                }
+
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        });
+        t.start();
+
+        @Cleanup
+        Producer<String> producer = pulsarClient.newProducer(Schema.STRING)
+                .topic(topic)
+                .create();
+
+        final int N = 1000;
+
+        for (int i = 0; i < N; i++) {
+            producer.newMessage()
+                    .value("msg-" + i)
+                    .deliverAfter(5, TimeUnit.SECONDS)
+                    .sendAsync();
+        }
+
+        producer.flush();
+
+        Message<String> msg = consumer.receive(100, TimeUnit.MILLISECONDS);
+        assertNull(msg);
+
+        Set<String> receivedMsgs = new TreeSet<>();
+        for (int i = 0; i < N; i++) {
+            msg = consumer.receive(10, TimeUnit.SECONDS);
+            receivedMsgs.add(msg.getValue());
+        }
+
+        assertEquals(receivedMsgs.size(), N);
+        for (int i = 0; i < N; i++) {
+            assertTrue(receivedMsgs.contains("msg-" + i));
+        }
+        t.interrupt();
     }
 }

@@ -21,6 +21,7 @@ package org.apache.pulsar.client.cli;
 import java.net.MalformedURLException;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -50,14 +51,18 @@ public class PulsarClientToolTest extends BrokerTestBase {
         super.internalCleanup();
     }
 
-    @Test(timeOut = 10000)
+    @Test
     public void testInitialzation() throws MalformedURLException, InterruptedException, ExecutionException, PulsarAdminException {
+
         Properties properties = new Properties();
         properties.setProperty("serviceUrl", brokerUrl.toString());
         properties.setProperty("useTls", "false");
 
-        admin.tenants().createTenant("property", new TenantInfo());
-        String topicName = "persistent://property/ns/topic-scale-ns-0/topic";
+        String tenantName = UUID.randomUUID().toString();
+
+        admin.tenants().createTenant(tenantName, new TenantInfo());
+
+        String topicName = String.format("persistent://%s/ns/topic-scale-ns-0/topic", tenantName);
 
         int numberOfMessages = 10;
 
@@ -92,7 +97,7 @@ public class PulsarClientToolTest extends BrokerTestBase {
         PulsarClientTool pulsarClientToolProducer = new PulsarClientTool(properties);
 
         String[] args = { "produce", "--messages", "Have a nice day", "-n", Integer.toString(numberOfMessages), "-r",
-                "20", topicName };
+                "20", "-p", "key1=value1", "-p", "key2=value2", "-k", "partition_key", topicName };
         Assert.assertEquals(pulsarClientToolProducer.run(args), 0);
 
         future.get();

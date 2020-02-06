@@ -25,7 +25,6 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.matches;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.testng.Assert.assertEquals;
@@ -49,6 +48,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks.AddEntryCallback;
@@ -56,12 +56,14 @@ import org.apache.bookkeeper.mledger.AsyncCallbacks.CloseCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.DeleteCursorCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.OpenCursorCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.OpenLedgerCallback;
+import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.impl.PositionImpl;
+import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.admin.AdminResource;
@@ -75,6 +77,7 @@ import org.apache.pulsar.broker.cache.ConfigurationCacheService;
 import org.apache.pulsar.broker.cache.LocalZooKeeperCacheService;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.service.ServerCnx.State;
+import org.apache.pulsar.broker.service.persistent.MessageDeduplication;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.service.schema.DefaultSchemaRegistryService;
 import org.apache.pulsar.broker.service.utils.ClientChannelHelper;
@@ -141,10 +144,14 @@ public class ServerCnxTest {
     private ManagedLedger ledgerMock = mock(ManagedLedger.class);
     private ManagedCursor cursorMock = mock(ManagedCursor.class);
 
+    private OrderedExecutor executor;
+
     @BeforeMethod
     public void setup() throws Exception {
+        executor = OrderedExecutor.newBuilder().numThreads(1).build();
         svcConfig = spy(new ServiceConfiguration());
         pulsar = spy(new PulsarService(svcConfig));
+        pulsar.setShutdownService(new NoOpShutdownService());
         doReturn(new DefaultSchemaRegistryService()).when(pulsar).getSchemaRegistryService();
 
         svcConfig.setKeepAliveIntervalSeconds(inSec(1, TimeUnit.SECONDS));
@@ -161,7 +168,7 @@ public class ServerCnxTest {
 
         ZooKeeper mockZk = createMockZooKeeper();
         doReturn(mockZk).when(pulsar).getZkClient();
-        doReturn(createMockBookKeeper(mockZk, pulsar.getOrderedExecutor().chooseThread(0)))
+        doReturn(createMockBookKeeper(mockZk, ForkJoinPool.commonPool()))
             .when(pulsar).getBookKeeperClient();
 
         configCacheService = mock(ConfigurationCacheService.class);
@@ -176,9 +183,9 @@ public class ServerCnxTest {
         doReturn(configCacheService).when(pulsar).getConfigurationCache();
         doReturn(zkCache).when(pulsar).getLocalZkCacheService();
 
-
         brokerService = spy(new BrokerService(pulsar));
         doReturn(brokerService).when(pulsar).getBrokerService();
+        doReturn(executor).when(pulsar).getOrderedExecutor();
 
         namespaceService = mock(NamespaceService.class);
         doReturn(namespaceService).when(pulsar).getNamespaceService();
@@ -200,6 +207,7 @@ public class ServerCnxTest {
         channel.close();
         pulsar.close();
         brokerService.close();
+        executor.shutdownNow();
     }
 
     @Test(timeOut = 30000)
@@ -346,7 +354,7 @@ public class ServerCnxTest {
         doReturn(authenticationService).when(brokerService).getAuthenticationService();
         doReturn(authenticationProvider).when(authenticationService).getAuthenticationProvider(Mockito.anyString());
         doReturn(authenticationState).when(authenticationProvider)
-            .newAuthState(Mockito.anyObject(), Mockito.anyObject(), Mockito.anyObject());
+            .newAuthState(Mockito.any(), Mockito.any(), Mockito.any());
         doReturn(authData).when(authenticationState)
             .authenticate(authData);
         doReturn(true).when(authenticationState)
@@ -521,7 +529,7 @@ public class ServerCnxTest {
         resetChannel();
         setChannelConnected();
         ByteBuf newSubscribeCmd = Commands.newSubscribe(nonExistentTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */, 0);
         channel.writeInbound(newSubscribeCmd);
         assertTrue(getResponse() instanceof CommandError);
     }
@@ -583,7 +591,8 @@ public class ServerCnxTest {
         resetChannel();
         setChannelConnected();
         ByteBuf newSubscribeCmd = Commands.newSubscribe(nonExistentTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(newSubscribeCmd);
         topicRef = (PersistentTopic) brokerService.getTopicReference(nonExistentTopicName).get();
         assertNotNull(topicRef);
@@ -698,7 +707,8 @@ public class ServerCnxTest {
         // Sending multiple subscribe commands for the same consumer should succeed
 
         ByteBuf subscribe1 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe1);
 
         // 1st subscribe succeeds
@@ -707,7 +717,8 @@ public class ServerCnxTest {
         assertEquals(((CommandSuccess) response).getRequestId(), 1);
 
         ByteBuf subscribe2 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 2 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 2 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe2);
 
         // 2nd subscribe succeeds
@@ -727,12 +738,14 @@ public class ServerCnxTest {
         doReturn(delayFuture).when(brokerService).getOrCreateTopic(any(String.class));
         // Create subscriber first time
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(clientCommand);
 
         // Create producer second time
         clientCommand = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(clientCommand);
 
         Object response = getResponse();
@@ -777,7 +790,7 @@ public class ServerCnxTest {
                 producerName, Collections.emptyMap());
         channel.writeInbound(createProducer2);
 
-        // Complete the topic opening
+        // Complete the topic opening: It will make 2nd producer creation successful
         openTopicFuture.get().run();
 
         // Close succeeds
@@ -785,13 +798,11 @@ public class ServerCnxTest {
         assertEquals(response.getClass(), CommandSuccess.class);
         assertEquals(((CommandSuccess) response).getRequestId(), 2);
 
-        // 2nd producer fails to create
+        // 2nd producer will be successfully created as topic is open by then
         response = getResponse();
-        assertEquals(response.getClass(), CommandError.class);
-        assertEquals(((CommandError) response).getRequestId(), 3);
+        assertEquals(response.getClass(), CommandProducerSuccess.class);
+        assertEquals(((CommandProducerSuccess) response).getRequestId(), 3);
 
-        // We should not receive response for 1st producer, since it was cancelled by the close
-        assertTrue(channel.outboundMessages().isEmpty());
         assertTrue(channel.isActive());
 
         channel.finish();
@@ -915,7 +926,7 @@ public class ServerCnxTest {
                 producerName, Collections.emptyMap());
         channel.writeInbound(createProducer2);
 
-        // Now the topic gets opened
+        // Now the topic gets opened.. It will make 2nd producer creation successful
         openFailedTopic.get().run();
 
         // Close succeeds
@@ -923,10 +934,10 @@ public class ServerCnxTest {
         assertEquals(response.getClass(), CommandSuccess.class);
         assertEquals(((CommandSuccess) response).getRequestId(), 2);
 
-        // 2nd producer fails
+        // 2nd producer success as topic is opened
         response = getResponse();
-        assertEquals(response.getClass(), CommandError.class);
-        assertEquals(((CommandError) response).getRequestId(), 3);
+        assertEquals(response.getClass(), CommandProducerSuccess.class);
+        assertEquals(((CommandProducerSuccess) response).getRequestId(), 3);
 
         // Wait till the failtopic timeout interval
         Thread.sleep(500);
@@ -934,10 +945,10 @@ public class ServerCnxTest {
                 producerName, Collections.emptyMap());
         channel.writeInbound(createProducer3);
 
-        // 3rd producer succeeds
+        // 3rd producer fails because 2nd is already connected
         response = getResponse();
-        assertEquals(response.getClass(), CommandProducerSuccess.class);
-        assertEquals(((CommandProducerSuccess) response).getRequestId(), 4);
+        assertEquals(response.getClass(), CommandError.class);
+        assertEquals(((CommandError) response).getRequestId(), 4);
 
         Thread.sleep(500);
 
@@ -973,22 +984,23 @@ public class ServerCnxTest {
         // (There can be more subscribe/close pairs in the sequence, depending on the client timeout
 
         ByteBuf subscribe1 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe1);
 
-        ByteBuf closeConsumer = Commands.newCloseConsumer(1 /* consumer id */, 2 /* request id */ );
-        channel.writeInbound(closeConsumer);
-
         ByteBuf subscribe2 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 3 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 3 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe2);
 
         ByteBuf subscribe3 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 4 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 4 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe3);
 
         ByteBuf subscribe4 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 5 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 5 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe4);
 
         openTopicTask.get().run();
@@ -996,10 +1008,6 @@ public class ServerCnxTest {
         Object response;
 
         synchronized (this) {
-            // Close succeeds
-            response = getResponse();
-            assertEquals(response.getClass(), CommandSuccess.class);
-            assertEquals(((CommandSuccess) response).getRequestId(), 2);
 
             // All other subscribe should fail
             response = getResponse();
@@ -1014,9 +1022,12 @@ public class ServerCnxTest {
             assertEquals(response.getClass(), CommandError.class);
             assertEquals(((CommandError) response).getRequestId(), 5);
 
-            // We should not receive response for 1st producer, since it was cancelled by the close
-            assertTrue(channel.outboundMessages().isEmpty());
+            // We should receive response for 1st producer, since it was not cancelled by the close
+            assertFalse(channel.outboundMessages().isEmpty());
             assertTrue(channel.isActive());
+            response = getResponse();
+            assertEquals(response.getClass(), CommandSuccess.class);
+            assertEquals(((CommandSuccess) response).getRequestId(), 1);
         }
 
         channel.finish();
@@ -1056,14 +1067,16 @@ public class ServerCnxTest {
         // These operations need to be serialized, to allow the last subscribe operation to finally succeed
         // (There can be more subscribe/close pairs in the sequence, depending on the client timeout
         ByteBuf subscribe1 = Commands.newSubscribe(failTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe1);
 
         ByteBuf closeConsumer = Commands.newCloseConsumer(1 /* consumer id */, 2 /* request id */ );
         channel.writeInbound(closeConsumer);
 
         ByteBuf subscribe2 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 3 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 3 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe2);
 
         openTopicFail.get().run();
@@ -1085,7 +1098,8 @@ public class ServerCnxTest {
         }
 
         ByteBuf subscribe3 = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 4 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 4 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(subscribe3);
 
         openTopicSuccess.get().run();
@@ -1114,7 +1128,8 @@ public class ServerCnxTest {
         doReturn(false).when(brokerService).isAuthorizationEnabled();
         // test SUBSCRIBE on topic and cursor creation success
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandSuccess);
 
@@ -1126,17 +1141,13 @@ public class ServerCnxTest {
 
         // test SUBSCRIBE on topic creation success and cursor failure
         clientCommand = Commands.newSubscribe(successTopicName, failSubName, 2, 2, SubType.Exclusive,
-                0, "test" /*
-                        * consumer name
-                        */);
+                0, "test", 0 /*avoid reseting cursor*/);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandError);
 
         // test SUBSCRIBE on topic creation failure
         clientCommand = Commands.newSubscribe(failTopicName, successSubName, 3, 3, SubType.Exclusive,
-                0, "test" /*
-                        * consumer name
-                        */);
+                0, "test", 0 /*avoid reseting cursor*/);
         channel.writeInbound(clientCommand);
         assertEquals(getResponse().getClass(), CommandError.class);
 
@@ -1158,7 +1169,7 @@ public class ServerCnxTest {
         // test SUBSCRIBE on topic and cursor creation success
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, //
                 successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0 /* priority */,
-                "test" /* consumer name */);
+                "test" /* consumer name */, 0 /*avoid reseting cursor*/);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandSuccess);
 
@@ -1167,11 +1178,11 @@ public class ServerCnxTest {
 
         // test SUBSCRIBE on topic and cursor creation success
         clientCommand = Commands.newSubscribe(successTopicName, failSubName, 2, 2, SubType.Exclusive, 0 /* priority */,
-                "test" /* consumer name */);
+                "test" /* consumer name */, 0 /*avoid reseting cursor*/);
         channel.writeInbound(clientCommand);
         Object response = getResponse();
         assertTrue(response instanceof CommandError);
-        assertTrue(((CommandError) response).getError().equals(ServerError.UnsupportedVersionError));
+        assertEquals(ServerError.UnsupportedVersionError, ((CommandError) response).getError());
 
         // Server will not close the connection
         assertTrue(channel.isOpen());
@@ -1192,7 +1203,8 @@ public class ServerCnxTest {
 
         // test SUBSCRIBE on topic and cursor creation success
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0,
+                "test" /* consumer name */, 0 /* avoid reseting cursor */);
         channel.writeInbound(clientCommand);
 
         assertTrue(getResponse() instanceof CommandSuccess);
@@ -1214,7 +1226,7 @@ public class ServerCnxTest {
 
         // test SUBSCRIBE on topic and cursor creation success
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, //
-                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                successSubName, 1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */, 0 /*avoid reseting cursor*/);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandError);
 
@@ -1229,7 +1241,7 @@ public class ServerCnxTest {
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, successSubName, 1 /* consumer id */,
                 1 /*
                    * request id
-                   */, SubType.Exclusive, 0, "test" /* consumer name */);
+                   */, SubType.Exclusive, 0, "test" /* consumer name */, 0 /*avoid reseting cursor*/);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandSuccess);
 
@@ -1250,7 +1262,8 @@ public class ServerCnxTest {
         setChannelConnected();
 
         ByteBuf clientCommand = Commands.newSubscribe(successTopicName, successSubName, //
-                1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */);
+                1 /* consumer id */, 1 /* request id */, SubType.Exclusive, 0, "test" /* consumer name */,
+                0 /* avoid reseting cursor */);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandSuccess);
 
@@ -1589,12 +1602,40 @@ public class ServerCnxTest {
         setChannelConnected();
 
         channel.writeInbound(Commands.newSubscribe(invalidTopicName, "test-subscription", 1, 1, SubType.Exclusive, 0,
-                "consumerName"));
+                "consumerName", 0 /*avoid reseting cursor*/));
         Object obj = getResponse();
         assertEquals(obj.getClass(), CommandError.class);
         CommandError res = (CommandError) obj;
         assertEquals(res.getError(), ServerError.InvalidTopicName);
 
         channel.finish();
+    }
+
+    @Test
+    public void testDelayedClosedProducer() throws Exception {
+        resetChannel();
+        setChannelConnected();
+
+        CompletableFuture<Topic> delayFuture = new CompletableFuture<>();
+        doReturn(delayFuture).when(brokerService).getOrCreateTopic(any(String.class));
+        // Create producer first time
+        int producerId = 1;
+        ByteBuf clientCommand = Commands.newProducer(successTopicName, producerId /* producer id */, 1 /* request id */,
+                "prod-name", Collections.emptyMap());
+        channel.writeInbound(clientCommand);
+
+        ByteBuf closeProducerCmd = Commands.newCloseProducer(producerId, 2);
+        channel.writeInbound(closeProducerCmd);
+
+        Topic topic = mock(Topic.class);
+        doReturn(CompletableFuture.completedFuture(topic)).when(brokerService).getOrCreateTopic(any(String.class));
+        doReturn(CompletableFuture.completedFuture(false)).when(topic).hasSchema();
+
+        clientCommand = Commands.newProducer(successTopicName, producerId /* producer id */, 1 /* request id */,
+                "prod-name", Collections.emptyMap());
+        channel.writeInbound(clientCommand);
+
+        Object response = getResponse();
+        assertTrue(response instanceof CommandSuccess);
     }
 }

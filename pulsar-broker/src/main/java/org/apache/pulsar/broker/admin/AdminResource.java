@@ -22,11 +22,16 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.pulsar.broker.cache.ConfigurationCacheService.POLICIES;
 import static org.apache.pulsar.common.util.Codec.decode;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.Lists;
+
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import javax.servlet.ServletContext;
@@ -41,13 +46,13 @@ import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.cache.LocalZooKeeperCacheService;
 import org.apache.pulsar.broker.web.PulsarWebResource;
 import org.apache.pulsar.broker.web.RestException;
-import org.apache.pulsar.common.naming.TopicDomain;
-import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.naming.Constants;
 import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceBundleFactory;
 import org.apache.pulsar.common.naming.NamespaceBundles;
 import org.apache.pulsar.common.naming.NamespaceName;
+import org.apache.pulsar.common.naming.TopicDomain;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.policies.data.BundlesData;
@@ -60,11 +65,12 @@ import org.apache.pulsar.common.policies.data.SubscribeRate;
 import org.apache.pulsar.common.policies.data.TenantInfo;
 import org.apache.pulsar.common.policies.impl.NamespaceIsolationPolicies;
 import org.apache.pulsar.common.util.Codec;
+import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.zookeeper.ZooKeeperCache;
-import org.apache.pulsar.zookeeper.ZooKeeperCache.Deserializer;
 import org.apache.pulsar.zookeeper.ZooKeeperChildrenCache;
 import org.apache.pulsar.zookeeper.ZooKeeperDataCache;
+import org.apache.zookeeper.AsyncCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs;
@@ -73,9 +79,6 @@ import org.apache.zookeeper.ZooKeeper.States;
 import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.Lists;
 
 public abstract class AdminResource extends PulsarWebResource {
     private static final Logger log = LoggerFactory.getLogger(AdminResource.class);
@@ -110,12 +113,32 @@ public abstract class AdminResource extends PulsarWebResource {
         ZkUtils.createFullPathOptimistic(globalZk(), path, content, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
     }
 
+    protected void zkCreateOptimisticAsync(String path, byte[] content, AsyncCallback.StringCallback callback) {
+        ZkUtils.asyncCreateFullPathOptimistic(globalZk(), path, content, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                CreateMode.PERSISTENT, callback, null);
+    }
+
     protected boolean zkPathExists(String path) throws KeeperException, InterruptedException {
         Stat stat = globalZk().exists(path, false);
         if (null != stat) {
             return true;
         }
         return false;
+    }
+
+    protected void zkSync(String path) throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicInteger rc = new AtomicInteger(KeeperException.Code.OK.intValue());
+        globalZk().sync(path, (rc2, s, ctx) -> {
+            if (KeeperException.Code.OK.intValue() != rc2) {
+                rc.set(rc2);
+            }
+            latch.countDown();
+        }, null);
+        latch.await();
+        if (KeeperException.Code.OK.intValue() != rc.get()) {
+            throw KeeperException.create(KeeperException.Code.get(rc.get()));
+        }
     }
 
     /**
@@ -230,6 +253,37 @@ public abstract class AdminResource extends PulsarWebResource {
 
         namespaces.sort(null);
         return namespaces;
+    }
+
+    protected void tryCreatePartitionsAsync(int numPartitions) {
+        if (!topicName.isPersistent()) {
+            return;
+        }
+        for (int i = 0; i < numPartitions; i++) {
+            tryCreatePartitionAsync(i);
+        }
+    }
+
+    private void tryCreatePartitionAsync(final int partition) {
+        zkCreateOptimisticAsync(ZkAdminPaths.managedLedgerPath(topicName.getPartition(partition)), new byte[0],
+            (rc, s, o, s1) -> {
+                if (KeeperException.Code.OK.intValue() == rc) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("[{}] Topic partition {} created.", clientAppId(),
+                            topicName.getPartition(partition));
+                    }
+                } else if (KeeperException.Code.NODEEXISTS.intValue() == rc) {
+                    log.info("[{}] Topic partition {} is exists, doing nothing.", clientAppId(),
+                        topicName.getPartition(partition));
+                } else if (KeeperException.Code.BADVERSION.intValue() == rc) {
+                    log.warn("[{}] Fail to create topic partition {} with concurrent modification, retry now.",
+                            clientAppId(), topicName.getPartition(partition));
+                    tryCreatePartitionAsync(partition);
+                } else {
+                    log.error("[{}] Fail to create topic partition {}", clientAppId(),
+                        topicName.getPartition(partition), KeeperException.create(KeeperException.Code.get(rc)));
+                }
+        });
     }
 
     protected NamespaceName namespaceName;
@@ -350,6 +404,36 @@ public abstract class AdminResource extends PulsarWebResource {
             log.error("[{}] Failed to get namespace policies {}", clientAppId(), namespaceName, e);
             throw new RestException(e);
         }
+
+    }
+
+    protected CompletableFuture<Policies> getNamespacePoliciesAsync(NamespaceName namespaceName) {
+        final String namespace = namespaceName.toString();
+        final String policyPath = AdminResource.path(POLICIES, namespace);
+
+        return policiesCache().getAsync(policyPath).thenCompose(policies -> {
+            if (policies.isPresent()) {
+                return pulsar()
+                        .getNamespaceService()
+                        .getNamespaceBundleFactory()
+                        .getBundlesAsync(namespaceName)
+                        .thenCompose(bundles -> {
+                    BundlesData bundleData = null;
+                    try {
+                        bundleData = NamespaceBundleFactory.getBundlesData(bundles);
+                    } catch (Exception e) {
+                        log.error("[{}] Failed to get namespace policies {}", clientAppId(), namespaceName, e);
+                        return FutureUtil.failedFuture(new RestException(e));
+                    }
+                    policies.get().bundles = bundleData != null ? bundleData : policies.get().bundles;
+                    // hydrate the namespace polices
+                    mergeNamespaceWithDefaults(policies.get(), namespace, policyPath);
+                    return CompletableFuture.completedFuture(policies.get());
+                });
+            } else {
+                return FutureUtil.failedFuture(new RestException(Status.NOT_FOUND, "Namespace does not exist"));
+            }
+        });
     }
 
     protected void mergeNamespaceWithDefaults(Policies policies, String namespace, String namespacePath) {
@@ -368,6 +452,14 @@ public abstract class AdminResource extends PulsarWebResource {
 
         if (policies.max_consumers_per_subscription < 1) {
             policies.max_consumers_per_subscription = config.getMaxConsumersPerSubscription();
+        }
+
+        if (policies.max_unacked_messages_per_consumer == -1) {
+            policies.max_unacked_messages_per_consumer = config.getMaxUnackedMessagesPerConsumer();
+        }
+
+        if (policies.max_unacked_messages_per_subscription == -1) {
+            policies.max_unacked_messages_per_subscription = config.getMaxUnackedMessagesPerSubscription();
         }
 
         final String cluster = config.getClusterName();
@@ -469,7 +561,7 @@ public abstract class AdminResource extends PulsarWebResource {
     }
 
     protected PartitionedTopicMetadata getPartitionedTopicMetadata(TopicName topicName,
-            boolean authoritative) {
+            boolean authoritative, boolean checkAllowAutoCreation) {
         validateClusterOwnership(topicName.getCluster());
         // validates global-namespace contains local/peer cluster: if peer/local cluster present then lookup can
         // serve/redirect request else fail partitioned-metadata-request so, client fails while creating
@@ -487,8 +579,12 @@ public abstract class AdminResource extends PulsarWebResource {
             throw new RestException(e);
         }
 
-        String path = path(PARTITIONED_TOPIC_PATH_ZNODE, namespaceName.toString(), domain(), topicName.getEncodedLocalName());
-        PartitionedTopicMetadata partitionMetadata = fetchPartitionedTopicMetadata(pulsar(), path);
+        PartitionedTopicMetadata partitionMetadata;
+        if (checkAllowAutoCreation) {
+            partitionMetadata = fetchPartitionedTopicMetadataCheckAllowAutoCreation(pulsar(), topicName);
+        } else {
+            partitionMetadata = fetchPartitionedTopicMetadata(pulsar(), topicName);
+        }
 
         if (log.isDebugEnabled()) {
             log.debug("[{}] Total number of partitions for topic {} is {}", clientAppId(), topicName,
@@ -497,9 +593,9 @@ public abstract class AdminResource extends PulsarWebResource {
         return partitionMetadata;
     }
 
-    protected static PartitionedTopicMetadata fetchPartitionedTopicMetadata(PulsarService pulsar, String path) {
+    protected static PartitionedTopicMetadata fetchPartitionedTopicMetadata(PulsarService pulsar, TopicName topicName) {
         try {
-            return fetchPartitionedTopicMetadataAsync(pulsar, path).get();
+            return pulsar.getBrokerService().fetchPartitionedTopicMetadataAsync(topicName).get();
         } catch (Exception e) {
             if (e.getCause() instanceof RestException) {
                 throw (RestException) e;
@@ -508,34 +604,20 @@ public abstract class AdminResource extends PulsarWebResource {
         }
     }
 
-    protected static CompletableFuture<PartitionedTopicMetadata> fetchPartitionedTopicMetadataAsync(
-            PulsarService pulsar, String path) {
-        CompletableFuture<PartitionedTopicMetadata> metadataFuture = new CompletableFuture<>();
+    protected static PartitionedTopicMetadata fetchPartitionedTopicMetadataCheckAllowAutoCreation(
+            PulsarService pulsar, TopicName topicName) {
         try {
-            // gets the number of partitions from the zk cache
-            pulsar.getGlobalZkCache().getDataAsync(path, new Deserializer<PartitionedTopicMetadata>() {
-                @Override
-                public PartitionedTopicMetadata deserialize(String key, byte[] content) throws Exception {
-                    return jsonMapper().readValue(content, PartitionedTopicMetadata.class);
-                }
-            }).thenAccept(metadata -> {
-                // if the partitioned topic is not found in zk, then the topic is not partitioned
-                if (metadata.isPresent()) {
-                    metadataFuture.complete(metadata.get());
-                } else {
-                    metadataFuture.complete(new PartitionedTopicMetadata());
-                }
-            }).exceptionally(ex -> {
-                metadataFuture.completeExceptionally(ex);
-                return null;
-            });
+            return pulsar.getBrokerService().fetchPartitionedTopicMetadataCheckAllowAutoCreationAsync(topicName)
+                    .get();
         } catch (Exception e) {
-            metadataFuture.completeExceptionally(e);
+            if (e.getCause() instanceof RestException) {
+                throw (RestException) e;
+            }
+            throw new RestException(e);
         }
-        return metadataFuture;
     }
 
-    protected void validateClusterExists(String cluster) {
+   protected void validateClusterExists(String cluster) {
         try {
             if (!clustersCache().get(path("clusters", cluster)).isPresent()) {
                 throw new RestException(Status.PRECONDITION_FAILED, "Cluster " + cluster + " does not exist.");
@@ -564,10 +646,14 @@ public abstract class AdminResource extends PulsarWebResource {
     }
 
     protected boolean isNamespaceReplicated(NamespaceName namespaceName) {
+        return getNamespaceReplicatedClusters(namespaceName).size() > 1;
+    }
+
+    protected Set<String> getNamespaceReplicatedClusters(NamespaceName namespaceName) {
         try {
             final Policies policies = policiesCache().get(ZkAdminPaths.namespacePoliciesPath(namespaceName))
                     .orElseThrow(() -> new RestException(Status.NOT_FOUND, "Namespace does not exist"));
-            return policies.replication_clusters.size() > 1;
+            return policies.replication_clusters;
         } catch (RestException re) {
             throw re;
         } catch (Exception e) {

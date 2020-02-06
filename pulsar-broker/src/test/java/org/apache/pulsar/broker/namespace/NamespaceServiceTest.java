@@ -26,6 +26,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
@@ -141,11 +142,11 @@ public class NamespaceServiceTest extends BrokerTestBase {
         byte[] content = this.pulsar.getLocalZkCache().getZooKeeper().getData(path, null, new Stat());
         Policies policies = ObjectMapperFactory.getThreadLocal().readValue(content, Policies.class);
         NamespaceBundles localZkBundles = bundleFactory.getBundles(nsname, policies.bundles);
-        assertTrue(updatedNsBundles.equals(localZkBundles));
+        assertEquals(localZkBundles, updatedNsBundles);
         log.info("Policies: {}", policies);
 
         // (3) validate ownership of new split bundles by local owner
-        bundleList.stream().forEach(b -> {
+        bundleList.forEach(b -> {
             try {
                 byte[] data = this.pulsar.getLocalZkCache().getZooKeeper().getData(ServiceUnitZkUtils.path(b), null,
                         new Stat());
@@ -203,8 +204,9 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
         // status-map should be updated with new split bundles
         NamespaceBundle splitBundle = pulsar.getNamespaceService().getBundle(topicName);
-        assertTrue(!CollectionUtils.isEmpty(
-                this.pulsar.getBrokerService().getAllTopicsFromNamespaceBundle(nspace, splitBundle.toString())));
+        assertFalse(CollectionUtils.isEmpty(
+            this.pulsar.getBrokerService()
+                .getAllTopicsFromNamespaceBundle(nspace, splitBundle.toString())));
 
     }
 
@@ -275,7 +277,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
                 result.completeExceptionally(new RuntimeException("first time failed"));
                 return result;
             }
-        }).when(spyTopic).close();
+        }).when(spyTopic).close(false);
         NamespaceBundle bundle = pulsar.getNamespaceService().getBundle(TopicName.get(topicName));
         try {
             pulsar.getNamespaceService().unloadNamespaceBundle(bundle);
@@ -314,7 +316,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
             public CompletableFuture<Void> answer(InvocationOnMock invocation) throws Throwable {
                 return new CompletableFuture<Void>();
             }
-        }).when(spyTopic).close();
+        }).when(spyTopic).close(false);
         NamespaceBundle bundle = pulsar.getNamespaceService().getBundle(TopicName.get(topicName));
 
         // try to unload bundle whose topic will be stuck
@@ -357,8 +359,10 @@ public class NamespaceServiceTest extends BrokerTestBase {
                 CreateMode.EPHEMERAL);
         LookupResult result1 = pulsar.getNamespaceService().createLookupResult(candidateBroker1).get();
 
-        // update to new load mananger
-        pulsar.getLoadManager().set(new ModularLoadManagerWrapper(new ModularLoadManagerImpl()));
+        // update to new load manager
+        LoadManager oldLoadManager = pulsar.getLoadManager()
+                .getAndSet(new ModularLoadManagerWrapper(new ModularLoadManagerImpl()));
+        oldLoadManager.stop();
         LookupResult result2 = pulsar.getNamespaceService().createLookupResult(candidateBroker2).get();
         Assert.assertEquals(result1.getLookupData().getBrokerUrl(), candidateBroker1);
         Assert.assertEquals(result2.getLookupData().getBrokerUrl(), candidateBroker2);
@@ -411,11 +415,11 @@ public class NamespaceServiceTest extends BrokerTestBase {
         byte[] content = this.pulsar.getLocalZkCache().getZooKeeper().getData(path, null, new Stat());
         Policies policies = ObjectMapperFactory.getThreadLocal().readValue(content, Policies.class);
         NamespaceBundles localZkBundles = bundleFactory.getBundles(nsname, policies.bundles);
-        assertTrue(updatedNsBundles.equals(localZkBundles));
+        assertEquals(localZkBundles, updatedNsBundles);
         log.info("Policies: {}", policies);
 
         // (3) validate ownership of new split bundles by local owner
-        bundleList.stream().forEach(b -> {
+        bundleList.forEach(b -> {
             try {
                 byte[] data = this.pulsar.getLocalZkCache().getZooKeeper().getData(ServiceUnitZkUtils.path(b), null,
                         new Stat());

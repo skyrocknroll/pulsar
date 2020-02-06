@@ -26,7 +26,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.testng.AssertJUnit.assertEquals;
-import static org.testng.AssertJUnit.assertFalse;
 import static org.testng.AssertJUnit.assertTrue;
 import static org.testng.AssertJUnit.fail;
 
@@ -43,6 +42,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.ConsumerBuilder;
 import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
+import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.common.functions.ConsumerConfig;
 import org.apache.pulsar.common.functions.FunctionConfig;
@@ -81,6 +82,7 @@ public class PulsarSourceTest {
         doReturn(consumerBuilder).when(consumerBuilder).topics(anyList());
         doReturn(consumerBuilder).when(consumerBuilder).cryptoFailureAction(any());
         doReturn(consumerBuilder).when(consumerBuilder).subscriptionName(any());
+        doReturn(consumerBuilder).when(consumerBuilder).subscriptionInitialPosition(any());
         doReturn(consumerBuilder).when(consumerBuilder).subscriptionType(any());
         doReturn(consumerBuilder).when(consumerBuilder).ackTimeout(anyLong(), any());
         doReturn(consumerBuilder).when(consumerBuilder).messageListener(any());
@@ -97,6 +99,8 @@ public class PulsarSourceTest {
         pulsarConfig.setProcessingGuarantees(FunctionConfig.ProcessingGuarantees.ATLEAST_ONCE);
         pulsarConfig.setTopicSchema(consumerConfigs);
         pulsarConfig.setTypeClassName(String.class.getName());
+        pulsarConfig.setSubscriptionPosition(SubscriptionInitialPosition.Latest);
+        pulsarConfig.setSubscriptionType(SubscriptionType.Shared);
         return pulsarConfig;
     }
 
@@ -127,17 +131,17 @@ public class PulsarSourceTest {
         pulsarConfig.setTypeClassName(Void.class.getName());
 
         @Cleanup
-        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>());
+        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>(), Thread.currentThread().getContextClassLoader());
 
         try {
             pulsarSource.open(new HashMap<>(), mock(SourceContext.class));
-            assertFalse(true);
+            fail();
         } catch (RuntimeException ex) {
             log.error("RuntimeException: {}", ex, ex);
             assertEquals(ex.getMessage(), "Input type of Pulsar Function cannot be Void");
         } catch (Exception ex) {
             log.error("Exception: {}", ex, ex);
-            assertFalse(true);
+            fail();
         }
     }
 
@@ -155,7 +159,7 @@ public class PulsarSourceTest {
         pulsarConfig.setTopicSchema(topicSerdeClassNameMap);
 
         @Cleanup
-        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>());
+        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>(), Thread.currentThread().getContextClassLoader());
         try {
             pulsarSource.open(new HashMap<>(), mock(SourceContext.class));
             fail("Should fail constructing java instance if function type is inconsistent with serde type");
@@ -164,7 +168,7 @@ public class PulsarSourceTest {
             assertTrue(ex.getMessage().startsWith("Inconsistent types found between function input type and serde type:"));
         } catch (Exception ex) {
             log.error("Exception: {}", ex, ex);
-            assertTrue(false);
+            fail();
         }
     }
 
@@ -182,7 +186,7 @@ public class PulsarSourceTest {
         pulsarConfig.setTopicSchema(consumerConfigs);
 
         @Cleanup
-        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>());
+        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>(), Thread.currentThread().getContextClassLoader());
 
         pulsarSource.open(new HashMap<>(), mock(SourceContext.class));
     }
@@ -197,7 +201,7 @@ public class PulsarSourceTest {
         pulsarConfig.setTopicSchema(consumerConfigs);
 
         @Cleanup
-        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>());
+        PulsarSource<?> pulsarSource = new PulsarSource<>(getPulsarClient(), pulsarConfig, new HashMap<>(), Thread.currentThread().getContextClassLoader());
 
         pulsarSource.setupConsumerConfigs();
     }

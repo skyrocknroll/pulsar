@@ -27,11 +27,14 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.distributedlog.api.namespace.Namespace;
@@ -46,9 +49,11 @@ import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.ConsumerImpl;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.common.functions.WorkerInfo;
+import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.functions.proto.Function;
+import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactoryConfig;
+import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory;
 import org.mockito.Mockito;
-import org.testng.Assert;
 import org.testng.annotations.Test;
 
 public class MembershipManagerTest {
@@ -58,7 +63,10 @@ public class MembershipManagerTest {
     public MembershipManagerTest() {
         this.workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
-        workerConfig.setThreadContainerFactory(new WorkerConfig.ThreadContainerFactory().setThreadGroupName("test"));
+        workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
+        workerConfig.setFunctionRuntimeFactoryConfigs(
+                ObjectMapperFactory.getThreadLocal().convertValue(
+                        new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
     }
@@ -191,7 +199,7 @@ public class MembershipManagerTest {
 
         verify(schedulerManager, times(0)).schedule();
         verify(functionRuntimeManager, times(0)).removeAssignments(any());
-        Assert.assertEquals(membershipManager.unsignedFunctionDurations.size(), 0);
+        assertEquals(membershipManager.unsignedFunctionDurations.size(), 0);
     }
 
     @Test
@@ -258,9 +266,9 @@ public class MembershipManagerTest {
 
         verify(schedulerManager, times(0)).schedule();
         verify(functionRuntimeManager, times(0)).removeAssignments(any());
-        Assert.assertEquals(membershipManager.unsignedFunctionDurations.size(), 1);
+        assertEquals(membershipManager.unsignedFunctionDurations.size(), 1);
         Function.Instance instance = Function.Instance.newBuilder().setFunctionMetaData(function2).setInstanceId(0).build();
-        Assert.assertTrue(membershipManager.unsignedFunctionDurations.get(instance) != null);
+        assertNotNull(membershipManager.unsignedFunctionDurations.get(instance));
 
         membershipManager.unsignedFunctionDurations.put(instance,
                 membershipManager.unsignedFunctionDurations.get(instance) - 30001);
@@ -277,7 +285,10 @@ public class MembershipManagerTest {
     public void testCheckFailuresSomeUnassigned() throws Exception {
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
-        workerConfig.setThreadContainerFactory(new WorkerConfig.ThreadContainerFactory().setThreadGroupName("test"));
+        workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
+        workerConfig.setFunctionRuntimeFactoryConfigs(
+                ObjectMapperFactory.getThreadLocal().convertValue(
+                        new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setRescheduleTimeoutMs(30000);
@@ -336,9 +347,9 @@ public class MembershipManagerTest {
 
         verify(schedulerManager, times(0)).schedule();
         verify(functionRuntimeManager, times(0)).removeAssignments(any());
-        Assert.assertEquals(membershipManager.unsignedFunctionDurations.size(), 1);
+        assertEquals(membershipManager.unsignedFunctionDurations.size(), 1);
         Function.Instance instance = Function.Instance.newBuilder().setFunctionMetaData(function2).setInstanceId(0).build();
-        Assert.assertTrue(membershipManager.unsignedFunctionDurations.get(instance) != null);
+        assertNotNull(membershipManager.unsignedFunctionDurations.get(instance));
 
         membershipManager.unsignedFunctionDurations.put(instance,
                 membershipManager.unsignedFunctionDurations.get(instance) - 30001);
@@ -353,7 +364,10 @@ public class MembershipManagerTest {
     public void testHeartBeatFunctionWorkerDown() throws Exception {
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setWorkerId("worker-1");
-        workerConfig.setThreadContainerFactory(new WorkerConfig.ThreadContainerFactory().setThreadGroupName("test"));
+        workerConfig.setFunctionRuntimeFactoryClassName(ThreadRuntimeFactory.class.getName());
+        workerConfig.setFunctionRuntimeFactoryConfigs(
+                ObjectMapperFactory.getThreadLocal().convertValue(
+                        new ThreadRuntimeFactoryConfig().setThreadGroupName("test"), Map.class));
         workerConfig.setPulsarServiceUrl("pulsar://localhost:6650");
         workerConfig.setStateStorageServiceUrl("foo");
         workerConfig.setRescheduleTimeoutMs(30000);
@@ -420,7 +434,7 @@ public class MembershipManagerTest {
 
         verify(schedulerManager, times(0)).schedule();
         verify(functionRuntimeManager, times(0)).removeAssignments(any());
-        Assert.assertEquals(membershipManager.unsignedFunctionDurations.size(), 0);
+        assertEquals(membershipManager.unsignedFunctionDurations.size(), 0);
     }
 
 }

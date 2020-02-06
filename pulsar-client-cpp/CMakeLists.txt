@@ -27,6 +27,8 @@ if(CCACHE_PROGRAM)
     MESSAGE(STATUS "Using CCache")
 endif(CCACHE_PROGRAM)
 
+MESSAGE(STATUS "ARCHITECTURE: ${CMAKE_SYSTEM_PROCESSOR}")
+
 option(BUILD_TESTS "Build tests" ON)
 MESSAGE(STATUS "BUILD_TESTS:  " ${BUILD_TESTS})
 
@@ -49,12 +51,16 @@ set(Boost_NO_BOOST_CMAKE ON)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_C_STANDARD 11)
 
-if (NOT MSVC)
-    add_compile_options(-msse4.2 -mpclmul -Werror=switch -Wno-deprecated-declarations)
-else()
+if (MSVC)
+    # Visual Studio compiler flags
     add_definitions(-DWIN32_LEAN_AND_MEAN -DNOGDI -D_WIN32_WINNT=0x0501 -D_CRT_SECURE_NO_WARNINGS)
     add_compile_options(/wd4244 /wd4267 /wd4018 /wd4715 /wd4251 /wd4275)
-endif(NOT MSVC)
+else()
+    add_compile_options(-Werror=switch -Wno-deprecated-declarations)
+    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+        add_compile_options(-msse4.2 -mpclmul)
+    endif()
+endif(MSVC)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -86,10 +92,12 @@ if (LINK_STATIC)
         endif (LOG4CXX_USE_DYNAMIC_LIBS)
     endif (USE_LOG4CXX)
 
-    if (NOT MSVC)
-        set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
-    else()
+    if (MSVC)
         add_definitions(-DCURL_STATICLIB)
+    endif()
+
+    if (UNIX AND NOT APPLE)
+        set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
     endif()
 
     SET(Boost_USE_STATIC_LIBS   ON)
@@ -102,7 +110,11 @@ else()
     endif (USE_LOG4CXX)
 endif (LINK_STATIC)
 
-find_package(Boost REQUIRED COMPONENTS program_options regex system)
+if (MSVC)
+  find_package(Boost REQUIRED COMPONENTS program_options regex system date_time)
+else()
+  find_package(Boost REQUIRED COMPONENTS program_options regex system)
+endif()
 
 find_package(ZLIB REQUIRED)
 
@@ -195,9 +207,13 @@ MESSAGE(STATUS "HAS_SNAPPY: ${HAS_SNAPPY}")
 set(ADDITIONAL_LIBRARIES $ENV{PULSAR_ADDITIONAL_LIBRARIES})
 link_directories( $ENV{PULSAR_ADDITIONAL_LIBRARY_PATH} )
 
+set(AUTOGEN_DIR ${CMAKE_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${AUTOGEN_DIR})
+
 include_directories(
   ${CMAKE_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/include
+  ${AUTOGEN_DIR}
   ${Boost_INCLUDE_DIR}
   ${OPENSSL_INCLUDE_DIR}
   ${ZLIB_INCLUDE_DIRS}
@@ -218,6 +234,13 @@ set(COMMON_LIBS
   ${Protobuf_LITE_LIBRARIES}
   ${ADDITIONAL_LIBRARIES}
 )
+
+if (MSVC)
+  set(COMMON_LIBS
+    ${COMMON_LIBS}
+    ${Boost_DATE_TIME_LIBRARY}
+  )
+endif()
 
 if (NOT MSVC)
     set(COMMON_LIBS

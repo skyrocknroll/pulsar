@@ -21,8 +21,11 @@ package org.apache.pulsar.broker.service;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.fail;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+
 import java.lang.reflect.Field;
-import java.net.URL;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -32,7 +35,6 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.bookkeeper.bookie.Bookie;
 import org.apache.bookkeeper.client.BookKeeper;
-import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl.EnsemblePlacementPolicyConfig;
@@ -40,9 +42,9 @@ import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo;
 import org.apache.bookkeeper.net.BookieSocketAddress;
 import org.apache.bookkeeper.proto.BookieServer;
-import org.apache.bookkeeper.test.PortManager;
 import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.pulsar.broker.ManagedLedgerClientFactory;
+import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerImpl;
@@ -74,20 +76,12 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-
 /**
  */
 public class BrokerBookieIsolationTest {
 
     private LocalBookkeeperEnsemble bkEnsemble;
     private PulsarService pulsarService;
-
-    private final int ZOOKEEPER_PORT = PortManager.nextFreePort();
-    private final int PRIMARY_BROKER_WEBSERVICE_PORT = PortManager.nextFreePort();
-    private final int PRIMARY_BROKER_PORT = PortManager.nextFreePort();
 
     private static final List<ACL> Acl = ZooDefs.Ids.OPEN_ACL_UNSAFE;
 
@@ -96,7 +90,7 @@ public class BrokerBookieIsolationTest {
     @BeforeMethod
     protected void setup() throws Exception {
         // Start local bookkeeper ensemble
-        bkEnsemble = new LocalBookkeeperEnsemble(4, ZOOKEEPER_PORT, () -> PortManager.nextFreePort());
+        bkEnsemble = new LocalBookkeeperEnsemble(4, 0, () -> 0);
         bkEnsemble.start();
     }
 
@@ -110,15 +104,15 @@ public class BrokerBookieIsolationTest {
 
     /**
      * Validate that broker can support tenant based bookie isolation.
-     * 
+     *
      * <pre>
      * 1. create two bookie-info group : default-group and isolated-group
-     * 2. namespace ns1 : uses default-group 
-     *    validate: bookie-ensemble for ns1-topics's ledger will be from default-group 
+     * 2. namespace ns1 : uses default-group
+     *    validate: bookie-ensemble for ns1-topics's ledger will be from default-group
      * 3. namespace ns2,ns3,ns4: uses isolated-group
      *    validate: bookie-ensemble for above namespace-topics's ledger will be from isolated-group
      * </pre>
-     * 
+     *
      * @throws Exception
      */
     @Test
@@ -149,9 +143,9 @@ public class BrokerBookieIsolationTest {
         ServiceConfiguration config = new ServiceConfiguration();
         config.setLoadManagerClassName(ModularLoadManagerImpl.class.getName());
         config.setClusterName(cluster);
-        config.setWebServicePort(Optional.of(PRIMARY_BROKER_WEBSERVICE_PORT));
-        config.setZookeeperServers("127.0.0.1" + ":" + ZOOKEEPER_PORT);
-        config.setBrokerServicePort(Optional.of(PRIMARY_BROKER_PORT));
+        config.setWebServicePort(Optional.of(0));
+        config.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
+        config.setBrokerServicePort(Optional.of(0));
         config.setAdvertisedAddress("localhost");
         config.setBookkeeperClientIsolationGroups(brokerBookkeeperClientIsolationGroups);
 
@@ -159,15 +153,18 @@ public class BrokerBookieIsolationTest {
         config.setManagedLedgerDefaultWriteQuorum(2);
         config.setManagedLedgerDefaultAckQuorum(2);
 
+        config.setAllowAutoTopicCreationType("non-partitioned");
+
         int totalEntriesPerLedger = 20;
         int totalLedgers = totalPublish / totalEntriesPerLedger;
         config.setManagedLedgerMaxEntriesPerLedger(totalEntriesPerLedger);
         config.setManagedLedgerMinLedgerRolloverTimeMinutes(0);
         pulsarService = new PulsarService(config);
+        pulsarService.setShutdownService(new NoOpShutdownService());
         pulsarService.start();
 
-        URL brokerUrl = new URL("http://127.0.0.1" + ":" + PRIMARY_BROKER_WEBSERVICE_PORT);
-        PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(brokerUrl.toString()).build();
+
+        PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(pulsarService.getWebServiceAddress()).build();
 
         ClusterData clusterData = new ClusterData(pulsarService.getWebServiceAddress());
         admin.clusters().createCluster(cluster, clusterData);
@@ -197,7 +194,7 @@ public class BrokerBookieIsolationTest {
             // Ok
         }
 
-        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(brokerUrl.toString())
+        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(pulsarService.getBrokerServiceUrl())
                 .statsInterval(-1, TimeUnit.SECONDS).build();
 
         PersistentTopic topic1 = (PersistentTopic) createTopicAndPublish(pulsarClient, ns1, "topic1", totalPublish);
@@ -245,7 +242,7 @@ public class BrokerBookieIsolationTest {
     /**
      * It verifies that "ZkIsolatedBookieEnsemblePlacementPolicy" considers secondary affinity-group if primary group
      * doesn't have enough non-faulty bookies.
-     * 
+     *
      * @throws Exception
      */
     @Test
@@ -280,25 +277,26 @@ public class BrokerBookieIsolationTest {
         ServiceConfiguration config = new ServiceConfiguration();
         config.setLoadManagerClassName(ModularLoadManagerImpl.class.getName());
         config.setClusterName(cluster);
-        config.setWebServicePort(Optional.of(PRIMARY_BROKER_WEBSERVICE_PORT));
-        config.setZookeeperServers("127.0.0.1" + ":" + ZOOKEEPER_PORT);
-        config.setBrokerServicePort(Optional.of(PRIMARY_BROKER_PORT));
+        config.setWebServicePort(Optional.of(0));
+        config.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
+        config.setBrokerServicePort(Optional.of(0));
         config.setAdvertisedAddress("localhost");
         config.setBookkeeperClientIsolationGroups(brokerBookkeeperClientIsolationGroups);
 
         config.setManagedLedgerDefaultEnsembleSize(2);
         config.setManagedLedgerDefaultWriteQuorum(2);
         config.setManagedLedgerDefaultAckQuorum(2);
+        config.setAllowAutoTopicCreationType("non-partitioned");
 
         int totalEntriesPerLedger = 20;
         int totalLedgers = totalPublish / totalEntriesPerLedger;
         config.setManagedLedgerMaxEntriesPerLedger(totalEntriesPerLedger);
         config.setManagedLedgerMinLedgerRolloverTimeMinutes(0);
         pulsarService = new PulsarService(config);
+        pulsarService.setShutdownService(new NoOpShutdownService());
         pulsarService.start();
 
-        URL brokerUrl = new URL("http://127.0.0.1" + ":" + PRIMARY_BROKER_WEBSERVICE_PORT);
-        PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(brokerUrl.toString()).build();
+        PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(pulsarService.getWebServiceAddress()).build();
 
         ClusterData clusterData = new ClusterData(pulsarService.getWebServiceAddress());
         admin.clusters().createCluster(cluster, clusterData);
@@ -328,7 +326,7 @@ public class BrokerBookieIsolationTest {
             // Ok
         }
 
-        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(brokerUrl.toString())
+        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(pulsarService.getBrokerServiceUrl())
                 .statsInterval(-1, TimeUnit.SECONDS).build();
 
         PersistentTopic topic1 = (PersistentTopic) createTopicAndPublish(pulsarClient, ns1, "topic1", totalPublish);
@@ -402,22 +400,23 @@ public class BrokerBookieIsolationTest {
         ServiceConfiguration config = new ServiceConfiguration();
         config.setLoadManagerClassName(ModularLoadManagerImpl.class.getName());
         config.setClusterName(cluster);
-        config.setWebServicePort(Optional.of(PRIMARY_BROKER_WEBSERVICE_PORT));
-        config.setZookeeperServers("127.0.0.1" + ":" + ZOOKEEPER_PORT);
-        config.setBrokerServicePort(Optional.of(PRIMARY_BROKER_PORT));
+        config.setWebServicePort(Optional.of(0));
+        config.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
+        config.setBrokerServicePort(Optional.of(0));
         config.setAdvertisedAddress("localhost");
         config.setBookkeeperClientIsolationGroups(brokerBookkeeperClientIsolationGroups);
 
         config.setManagedLedgerDefaultEnsembleSize(2);
         config.setManagedLedgerDefaultWriteQuorum(2);
         config.setManagedLedgerDefaultAckQuorum(2);
+        config.setAllowAutoTopicCreationType("non-partitioned");
 
         config.setManagedLedgerMinLedgerRolloverTimeMinutes(0);
         pulsarService = new PulsarService(config);
+        pulsarService.setShutdownService(new NoOpShutdownService());
         pulsarService.start();
 
-        URL brokerUrl = new URL("http://127.0.0.1" + ":" + PRIMARY_BROKER_WEBSERVICE_PORT);
-        PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(brokerUrl.toString()).build();
+        PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(pulsarService.getWebServiceAddress()).build();
 
         ClusterData clusterData = new ClusterData(pulsarService.getWebServiceAddress());
         admin.clusters().createCluster(cluster, clusterData);
@@ -452,7 +451,7 @@ public class BrokerBookieIsolationTest {
                 tenantNamespaceIsolationGroupsPrimary, tenantNamespaceIsolationGroupsSecondary));
 
     }
-    
+
     private void assertAffinityBookies(LedgerManager ledgerManager, List<LedgerInfo> ledgers1,
             Set<BookieSocketAddress> defaultBookies) throws Exception {
         for (LedgerInfo lInfo : ledgers1) {
