@@ -41,7 +41,7 @@ public class TransactionTimeoutTrackerImpl implements TransactionTimeoutTracker,
     private final long tickTimeMillis;
     private final Clock clock;
     private Timeout currentTimeout;
-    private final static long INITIAL_TIMEOUT = 1L;
+    private static final long INITIAL_TIMEOUT = 1L;
 
     private volatile long nowTaskTimeoutTime = INITIAL_TIMEOUT;
     private final long tcId;
@@ -70,10 +70,13 @@ public class TransactionTimeoutTrackerImpl implements TransactionTimeoutTracker,
                 currentTimeout = timer.newTimeout(this, timeout, TimeUnit.MILLISECONDS);
                 nowTaskTimeoutTime = transactionTimeoutTime;
             } else if (nowTaskTimeoutTime > transactionTimeoutTime) {
-                if (currentTimeout.cancel()) {
+                if (currentTimeout.cancel() || currentTimeout.isExpired()) {
                     currentTimeout = timer.newTimeout(this, timeout, TimeUnit.MILLISECONDS);
                     nowTaskTimeoutTime = transactionTimeoutTime;
                 }
+            } else if (currentTimeout.isExpired()) {
+                currentTimeout = timer.newTimeout(this, timeout, TimeUnit.MILLISECONDS);
+                nowTaskTimeoutTime = transactionTimeoutTime;
             }
         }
         return CompletableFuture.completedFuture(false);

@@ -45,8 +45,8 @@ import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.api.proto.ProducerAccessMode;
 import org.apache.pulsar.common.api.proto.ServerError;
 import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.common.policies.data.NonPersistentPublisherStats;
-import org.apache.pulsar.common.policies.data.PublisherStats;
+import org.apache.pulsar.common.policies.data.stats.NonPersistentPublisherStatsImpl;
+import org.apache.pulsar.common.policies.data.stats.PublisherStatsImpl;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.protocol.schema.SchemaVersion;
 import org.apache.pulsar.common.stats.Rate;
@@ -77,7 +77,7 @@ public class Producer {
     private boolean isClosed = false;
     private final CompletableFuture<Void> closeFuture;
 
-    private final PublisherStats stats;
+    private final PublisherStatsImpl stats;
     private final boolean isRemote;
     private final String remoteCluster;
     private final boolean isNonPersistentTopic;
@@ -89,6 +89,7 @@ public class Producer {
     private final Map<String, String> metadata;
 
     private final SchemaVersion schemaVersion;
+    private final String clientAddress; // IP address only, no port number included
 
     public Producer(Topic topic, TransportCnx cnx, long producerId, String producerName, String appId,
             boolean isEncrypted, Map<String, String> metadata, SchemaVersion schemaVersion, long epoch,
@@ -110,7 +111,7 @@ public class Producer {
 
         this.metadata = metadata != null ? metadata : Collections.emptyMap();
 
-        this.stats = isNonPersistentTopic ? new NonPersistentPublisherStats() : new PublisherStats();
+        this.stats = isNonPersistentTopic ? new NonPersistentPublisherStatsImpl() : new PublisherStatsImpl();
         if (cnx.hasHAProxyMessage()) {
             stats.setAddress(cnx.getHAProxyMessage().sourceAddress() + ":" + cnx.getHAProxyMessage().sourcePort());
         } else {
@@ -131,6 +132,8 @@ public class Producer {
         this.schemaVersion = schemaVersion;
         this.accessMode = accessMode;
         this.topicEpoch = topicEpoch;
+
+        this.clientAddress = cnx.clientSourceAddress();
     }
 
     @Override
@@ -580,7 +583,7 @@ public class Producer {
         }
         if (this.isNonPersistentTopic) {
             msgDrop.calculateRate();
-            ((NonPersistentPublisherStats) stats).msgDropRate = msgDrop.getRate();
+            ((NonPersistentPublisherStatsImpl) stats).msgDropRate = msgDrop.getRate();
         }
     }
 
@@ -596,7 +599,7 @@ public class Producer {
         return remoteCluster;
     }
 
-    public PublisherStats getStats() {
+    public PublisherStatsImpl getStats() {
         return stats;
     }
 
@@ -660,6 +663,10 @@ public class Producer {
 
     public Optional<Long> getTopicEpoch() {
         return topicEpoch;
+    }
+
+    public String getClientAddress() {
+        return clientAddress;
     }
 
     private static final Logger log = LoggerFactory.getLogger(Producer.class);

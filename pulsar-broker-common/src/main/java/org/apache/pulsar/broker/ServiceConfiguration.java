@@ -39,7 +39,7 @@ import org.apache.pulsar.common.configuration.PulsarConfiguration;
 import org.apache.pulsar.common.nar.NarClassLoader;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.policies.data.InactiveTopicDeleteMode;
-import org.apache.pulsar.common.policies.data.OffloadPolicies;
+import org.apache.pulsar.common.policies.data.OffloadedReadPriority;
 import org.apache.pulsar.common.policies.data.TopicType;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.sasl.SaslConstants;
@@ -220,10 +220,13 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
             category = CATEGORY_SERVER,
-            doc = "Number of threads to use for pulsar broker service."
-                    + " The executor in thread pool will do transaction recover"
+            doc = "Option to enable busy-wait settings. Default is false. "
+                    + "WARNING: This option will enable spin-waiting on executors and IO threads in order "
+                    + "to reduce latency during context switches. The spinning will consume 100% CPU even "
+                    + "when the broker is not doing any work. It is recommended to reduce the number of IO threads "
+                    + "and BK client threads to only have few CPU cores busy."
     )
-    private int numTransactionExecutorThreadPoolSize = Runtime.getRuntime().availableProcessors();
+    private boolean enableBusyWait = false;
 
     @FieldContext(category = CATEGORY_SERVER, doc = "Max concurrent web requests")
     private int maxConcurrentHttpRequests = 1024;
@@ -414,6 +417,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
                 + "requests in memory. Default: 1000"
     )
     private int maxPendingPublishRequestsPerConnection = 1000;
+
     @FieldContext(
         category = CATEGORY_POLICIES,
         doc = "How frequently to proactively check and purge expired messages"
@@ -533,6 +537,18 @@ public class ServiceConfiguration implements PulsarConfiguration {
                 + " Using a value of 0, is disabling maxTopicsPerNamespace-limit check."
     )
     private int maxTopicsPerNamespace = 0;
+
+    @FieldContext(
+        category = CATEGORY_POLICIES,
+        doc = "The maximum number of connections in the broker. If it exceeds, new connections are rejected."
+    )
+    private int brokerMaxConnections = 0;
+
+    @FieldContext(
+        category = CATEGORY_POLICIES,
+        doc = "The maximum number of connections per IP. If it exceeds, new connections are rejected."
+    )
+    private int brokerMaxConnectionsPerIp = 0;
 
     @FieldContext(
         category = CATEGORY_SERVER,
@@ -816,6 +832,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
         category = CATEGORY_SERVER,
+        doc = "Max number of producers with the same IP address allowed to connect to topic."
+            + " \n\nOnce this limit reaches, Broker will reject new producers until the number of"
+            + " connected producers with the same IP address decrease."
+            + " Using a value of 0, is disabling maxSameAddressProducersPerTopic-limit check.")
+    private int maxSameAddressProducersPerTopic = 0;
+
+    @FieldContext(
+        category = CATEGORY_SERVER,
         doc = "Enforce producer to publish encrypted messages.(default disable).")
     private boolean encryptionRequireOnProducer = false;
 
@@ -825,6 +849,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
             + " Broker will reject new consumers until the number of connected consumers decrease."
             + " Using a value of 0, is disabling maxConsumersPerTopic-limit check.")
     private int maxConsumersPerTopic = 0;
+
+    @FieldContext(
+        category = CATEGORY_SERVER,
+        doc = "Max number of consumers with the same IP address allowed to connect to topic."
+            + " \n\nOnce this limit reaches, Broker will reject new consumers until the number of"
+            + " connected consumers with the same IP address decrease."
+            + " Using a value of 0, is disabling maxSameAddressConsumersPerTopic-limit check.")
+    private int maxSameAddressConsumersPerTopic = 0;
 
     @FieldContext(
         category = CATEGORY_SERVER,
@@ -895,6 +927,12 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "Check between intervals to see if consumed ledgers need to be trimmed"
     )
     private int retentionCheckIntervalInSeconds = 120;
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "Check between intervals to see if max message size of topic policy has updated. default is 60s"
+    )
+    private int maxMessageSizeCheckIntervalInSeconds = 60;
 
     @FieldContext(
             category = CATEGORY_SERVER,
@@ -1007,7 +1045,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
     @FieldContext(
         category = CATEGORY_TLS,
         doc = "Specify the tls protocols the broker will use to negotiate during TLS Handshake.\n\n"
-            + "Example:- [TLSv1.2, TLSv1.1, TLSv1]"
+            + "Example:- [TLSv1.3, TLSv1.2]"
     )
     private Set<String> tlsProtocols = Sets.newTreeSet();
     @FieldContext(
@@ -1030,7 +1068,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean authenticationEnabled = false;
     @FieldContext(
         category = CATEGORY_AUTHENTICATION,
-        doc = "Autentication provider name list, which is a list of class names"
+        doc = "Authentication provider name list, which is a list of class names"
     )
     private Set<String> authenticationProviders = Sets.newTreeSet();
 
@@ -1108,6 +1146,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "If >0, it will reject all HTTP requests with bodies larged than the configured limit"
     )
     private long httpMaxRequestSize = -1;
+
+    @FieldContext(
+        category =  CATEGORY_HTTP,
+        doc = "If true, the broker will reject all HTTP requests using the TRACE and TRACK verbs.\n"
+        + " This setting may be necessary if the broker is deployed into an environment that uses http port\n"
+        + " scanning and flags web servers allowing the TRACE method as insecure."
+    )
+    private boolean disableHttpDebugMethods = false;
 
     @FieldContext(
             category =  CATEGORY_HTTP,
@@ -1309,6 +1355,13 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private int bookkeeperClientThrottleValue = 0;
 
+    @FieldContext(
+            category = CATEGORY_STORAGE_BK,
+            doc = "Number of BookKeeper client worker threads. Default is Runtime.getRuntime().availableProcessors()"
+    )
+    private int bookkeeperClientNumWorkerThreads = Runtime.getRuntime().availableProcessors();
+
+
     /**** --- Managed Ledger --- ****/
     @FieldContext(
         minValue = 1,
@@ -1436,9 +1489,11 @@ public class ServiceConfiguration implements PulsarConfiguration {
     @FieldContext(
         category = CATEGORY_STORAGE_ML,
         doc = "Max number of entries to append to a ledger before triggering a rollover.\n\n"
-            + "A ledger rollover is triggered on these conditions Either the max"
-            + " rollover time has been reached or max entries have been written to the"
-            + " ledged and at least min-time has passed")
+            + "A ledger rollover is triggered after the min rollover time has passed"
+            + " and one of the following conditions is true:"
+            + " the max rollover time has been reached,"
+            + " the max entries have been written to the ledger, or"
+            + " the max ledger size has been written to the ledger")
     private int managedLedgerMaxEntriesPerLedger = 50000;
     @FieldContext(
         category = CATEGORY_STORAGE_ML,
@@ -1543,7 +1598,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(category = CATEGORY_STORAGE_ML,
             doc = "Read priority when ledgers exists in both bookkeeper and the second layer storage.")
-    private String managedLedgerDataReadPriority = OffloadPolicies.OffloadedReadPriority.TIERED_STORAGE_FIRST
+    private String managedLedgerDataReadPriority = OffloadedReadPriority.TIERED_STORAGE_FIRST
             .getValue();
 
     /*** --- Load balancer --- ****/
@@ -1847,6 +1902,13 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private long brokerServiceCompactionThresholdInBytes = 0;
 
     @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "Timeout for the compaction phase one loop, If the execution time of the compaction " +
+                    "phase one loop exceeds this time, the compaction will not proceed."
+    )
+    private long brokerServiceCompactionPhaseOneLoopTimeInSeconds = 30;
+
+    @FieldContext(
         category = CATEGORY_SCHEMA,
         doc = "Enforce schema validation on following cases:\n\n"
             + " - if a producer without a schema attempts to produce to a topic with schema, the producer will be\n"
@@ -1910,6 +1972,11 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean exposeProducerLevelMetricsInPrometheus = false;
     @FieldContext(
             category = CATEGORY_METRICS,
+            doc = "If true, export managed ledger metrics (aggregated by namespace)"
+    )
+    private boolean exposeManagedLedgerMetricsInPrometheus = true;
+    @FieldContext(
+            category = CATEGORY_METRICS,
             doc = "If true, export managed cursor metrics"
     )
     private boolean exposeManagedCursorMetricsInPrometheus = false;
@@ -1925,6 +1992,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
             " this would be more efficient but may be inaccurate. Default is false."
     )
     private boolean exposePreciseBacklogInPrometheus = false;
+
+    @FieldContext(
+        category = CATEGORY_METRICS,
+        doc = "Time in milliseconds that metrics endpoint would time out. Default is 30s.\n" +
+            " Increase it if there are a lot of topics to expose topic-level metrics.\n" +
+            " Set it to 0 to disable timeout."
+    )
+    private long metricsServletTimeoutMs = 30000;
 
     @FieldContext(
             category = CATEGORY_METRICS,
@@ -2018,6 +2093,20 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private String transactionBufferProviderClassName =
             "org.apache.pulsar.broker.transaction.buffer.impl.TopicTransactionBufferProvider";
+
+    @FieldContext(
+            category = CATEGORY_TRANSACTION,
+            doc = "Class name for transaction pending ack store provider"
+    )
+    private String transactionPendingAckStoreProviderClassName =
+            "org.apache.pulsar.broker.transaction.pendingack.impl.MLPendingAckStoreProvider";
+
+    @FieldContext(
+            category = CATEGORY_TRANSACTION,
+            doc = "Number of threads to use for pulsar transaction replay PendingAckStore or TransactionBuffer."
+                    + "Default is 5"
+    )
+    private int numTransactionReplayThreadPoolSize = Runtime.getRuntime().availableProcessors();
 
     @FieldContext(
             category = CATEGORY_TRANSACTION,
@@ -2122,7 +2211,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
             category = CATEGORY_KEYSTORE_TLS,
             doc = "Specify the tls protocols the broker will use to negotiate during TLS handshake"
                   + " (a comma-separated list of protocol names).\n\n"
-                  + "Examples:- [TLSv1.2, TLSv1.1, TLSv1] \n"
+                  + "Examples:- [TLSv1.3, TLSv1.2] \n"
                   + " used by the internal client to authenticate with Pulsar brokers"
     )
     private Set<String> brokerClientTlsProtocols = Sets.newTreeSet();
@@ -2238,4 +2327,5 @@ public class ServiceConfiguration implements PulsarConfiguration {
             return brokerDeleteInactiveTopicsMaxInactiveDurationSeconds;
         }
     }
+
 }

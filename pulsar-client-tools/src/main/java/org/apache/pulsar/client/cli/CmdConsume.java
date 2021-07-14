@@ -23,6 +23,7 @@ import static org.apache.pulsar.client.internal.DefaultImplementation.getBytes;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
 import com.beust.jcommander.Parameters;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.RateLimiter;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -35,6 +36,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -42,14 +44,26 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 import org.apache.commons.io.HexDump;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pulsar.client.api.*;
+import org.apache.pulsar.client.api.Authentication;
+import org.apache.pulsar.client.api.AuthenticationDataProvider;
+import org.apache.pulsar.client.api.ClientBuilder;
+import org.apache.pulsar.client.api.Consumer;
+import org.apache.pulsar.client.api.ConsumerBuilder;
+import org.apache.pulsar.client.api.Message;
+import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
+import org.apache.pulsar.client.api.SubscriptionMode;
+import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.api.schema.Field;
+import org.apache.pulsar.client.api.schema.GenericObject;
 import org.apache.pulsar.client.api.schema.GenericRecord;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.schema.KeyValue;
 import org.apache.pulsar.common.util.collections.GrowableArrayBlockingQueue;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.websocket.api.RemoteEndpoint;
@@ -164,15 +178,9 @@ public class CmdConsume {
             data = "null";
         } else if (value instanceof byte[]) {
             byte[] msgData = (byte[]) value;
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            if (!displayHex) {
-                data = new String(msgData);
-            } else {
-                HexDump.dump(msgData, 0, out, 0);
-                data = new String(out.toByteArray());
-            }
-        } else if (value instanceof GenericRecord) {
-            Map<String, Object> asMap = genericRecordToMap((GenericRecord) value);
+            data = interpretByteArray(displayHex, msgData);
+        } else if (value instanceof GenericObject) {
+            Map<String, Object> asMap = genericObjectToMap((GenericObject) value, displayHex);
             data = asMap.toString();
         } else if (value instanceof ByteBuffer) {
             data = new String(getBytes((ByteBuffer) value));
@@ -194,19 +202,65 @@ public class CmdConsume {
         return sb.toString();
     }
 
-    private static Map<String, Object> genericRecordToMap(GenericRecord value) {
-        return value.getFields()
-                .stream()
-                .collect(Collectors.toMap(Field::getName, f -> {
-                    Object fieldValue = value.getField(f);
-                    if (fieldValue instanceof GenericRecord) {
-                        return genericRecordToMap((GenericRecord) fieldValue);
-                    } else if (fieldValue == null) {
-                        return "null";
-                    } else {
-                        return fieldValue;
-                    }
-                }));
+    private static String interpretByteArray(boolean displayHex, byte[] msgData) throws IOException {
+        String data;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (!displayHex) {
+            return new String(msgData);
+        } else {
+            HexDump.dump(msgData, 0, out, 0);
+            return out.toString();
+        }
+    }
+
+    private static Map<String, Object> genericObjectToMap(GenericObject value, boolean displayHex) throws IOException {
+        switch (value.getSchemaType()) {
+            case AVRO:
+            case JSON:
+            case PROTOBUF_NATIVE:
+                    return genericRecordToMap((GenericRecord) value, displayHex);
+            case KEY_VALUE:
+                    return keyValueToMap((KeyValue) value.getNativeObject(), displayHex);
+            default:
+                return primitiveValueToMap(value.getNativeObject(), displayHex);
+        }
+    }
+
+    private static Map<String, Object> keyValueToMap(KeyValue value, boolean displayHex) throws IOException {
+        if (value == null) {
+            return ImmutableMap.of("value", "NULL");
+        }
+        return ImmutableMap.of("key", primitiveValueToMap(value.getKey(), displayHex),
+                "value", primitiveValueToMap(value.getValue(), displayHex));
+    }
+
+    private static Map<String, Object> primitiveValueToMap(Object value, boolean displayHex) throws IOException {
+        if (value == null) {
+            return ImmutableMap.of("value", "NULL");
+        }
+        if (value instanceof GenericObject) {
+            return genericObjectToMap((GenericObject) value, displayHex);
+        }
+        if (value instanceof byte[]) {
+            value = interpretByteArray(displayHex, (byte[]) value);
+        }
+        return ImmutableMap.of("value", value.toString(), "type", value.getClass());
+    }
+
+    private static Map<String, Object> genericRecordToMap(GenericRecord value, boolean displayHex) throws IOException {
+        Map<String, Object> res = new HashMap<>();
+        for (Field f : value.getFields()) {
+            Object fieldValue = value.getField(f);
+            if (fieldValue instanceof GenericRecord) {
+                fieldValue = genericRecordToMap((GenericRecord) fieldValue, displayHex);
+            } else if (fieldValue == null) {
+                fieldValue =  "NULL";
+            } else if (fieldValue instanceof byte[]) {
+                fieldValue = interpretByteArray(displayHex, (byte[]) fieldValue);
+            }
+            res.put(f.getName(), fieldValue);
+        }
+        return res;
     }
 
     /**
@@ -370,8 +424,9 @@ public class CmdConsume {
                     LOG.debug("No message to consume after waiting for 5 seconds.");
                 } else {
                     try {
-                        System.out.println(Base64.getDecoder().decode(msg));
-                    }catch(Exception e) {
+                        String output = interpretByteArray(displayHex, Base64.getDecoder().decode(msg));
+                        System.out.println(output); // print decode
+                    } catch (Exception e) {
                         System.out.println(msg);
                     }
                     numMessagesConsumed += 1;

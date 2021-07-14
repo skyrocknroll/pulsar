@@ -18,15 +18,31 @@
  */
 package org.apache.pulsar.tests.integration;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import lombok.Cleanup;
 import org.apache.pulsar.client.admin.PulsarAdmin;
-import org.apache.pulsar.client.admin.PulsarAdminException;
-import org.apache.pulsar.client.api.*;
+import org.apache.pulsar.client.api.CompressionType;
+import org.apache.pulsar.client.api.Consumer;
+import org.apache.pulsar.client.api.ConsumerCryptoFailureAction;
+import org.apache.pulsar.client.api.CryptoKeyReader;
+import org.apache.pulsar.client.api.EncryptionKeyInfo;
+import org.apache.pulsar.client.api.Message;
+import org.apache.pulsar.client.api.MessageCrypto;
+import org.apache.pulsar.client.api.MessageRoutingMode;
+import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.client.impl.TopicMessageImpl;
 import org.apache.pulsar.client.impl.crypto.MessageCryptoBc;
 import org.apache.pulsar.common.api.EncryptionContext;
-import org.apache.pulsar.common.api.proto.EncryptionKeys;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.api.proto.SingleMessageMetadata;
 import org.apache.pulsar.common.compression.CompressionCodec;
@@ -45,15 +61,15 @@ import org.testng.annotations.Test;
 
 import java.io.IOException;
 import java.net.URI;
-import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.Security;
-import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-import static org.testng.Assert.*;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertTrue;
 
 public class SimpleProducerConsumerTest extends TestRetrySupport {
     private static final Logger log = LoggerFactory.getLogger(SimpleProducerConsumerTest.class);
@@ -77,7 +93,10 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
         @Cleanup
         PulsarAdmin admin = PulsarAdmin.builder().serviceHttpUrl(pulsarContainer.getPulsarAdminUrl()).build();
         admin.tenants().createTenant("my-property",
-                new TenantInfo(new HashSet<>(Arrays.asList("appid1", "appid2")), Collections.singleton("standalone")));
+                TenantInfo.builder()
+                        .adminRoles(new HashSet<>(Arrays.asList("appid1", "appid2")))
+                        .allowedClusters(Collections.singleton("standalone"))
+                        .build());
         admin.namespaces().createNamespace("my-property/my-ns");
         admin.namespaces().setNamespaceReplicationClusters("my-property/my-ns", Collections.singleton("standalone"));
     }
@@ -194,7 +213,7 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
                 "Received message " + receivedMessage + " did not match the expected message " + expectedMessage);
 
         // Make sure that there are no duplicates
-        Assert.assertTrue(messagesReceived.add(receivedMessage), "Received duplicate message " + receivedMessage);
+        assertTrue(messagesReceived.add(receivedMessage), "Received duplicate message " + receivedMessage);
     }
 
     @Test
@@ -407,7 +426,7 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
         // 3. KeyReder is not set by consumer
         // Receive should fail since key reader is not setup
         msg = (MessageImpl<byte[]>) consumer.receive(5, TimeUnit.SECONDS);
-        Assert.assertNull(msg, "Receive should have failed with no keyreader");
+        assertNull(msg, "Receive should have failed with no keyreader");
 
         // 4. Set consumer config to consume even if decryption fails
         consumer.close();
@@ -458,7 +477,7 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
 
         // Receive should proceed and discard encrypted messages
         msg = (MessageImpl<byte[]>) consumer.receive(5, TimeUnit.SECONDS);
-        Assert.assertNull(msg, "Message received even aftet ConsumerCryptoFailureAction.DISCARD is set.");
+        assertNull(msg, "Message received even aftet ConsumerCryptoFailureAction.DISCARD is set.");
     }
 
     @Test(groups = "encryption")
@@ -528,7 +547,7 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
     private String decryptMessage(TopicMessageImpl<byte[]> msg, String encryptionKeyName, CryptoKeyReader reader)
             throws Exception {
         Optional<EncryptionContext> ctx = msg.getEncryptionCtx();
-        Assert.assertTrue(ctx.isPresent());
+        assertTrue(ctx.isPresent());
         EncryptionContext encryptionCtx = ctx
                 .orElseThrow(() -> new IllegalStateException("encryption-ctx not present for encrypted message"));
 
@@ -546,10 +565,9 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
         String encAlgo = encryptionCtx.getAlgorithm();
         int batchSize = encryptionCtx.getBatchSize().orElse(0);
 
-        ByteBuf payloadBuf = Unpooled.wrappedBuffer(msg.getData());
+        ByteBuffer payloadBuf = ByteBuffer.wrap(msg.getData());
         // try to decrypt use default MessageCryptoBc
         MessageCrypto crypto = new MessageCryptoBc("test", false);
-
         MessageMetadata msgMetadata = new MessageMetadata()
                 .setEncryptionParam(encrParam)
                 .setProducerName("test")
@@ -566,11 +584,12 @@ public class SimpleProducerConsumerTest extends TestRetrySupport {
                 .setKey(encryptionKeyName)
                 .setValue(dataKey);
 
-        ByteBuf decryptedPayload = crypto.decrypt(() -> msgMetadata, payloadBuf, reader);
+        ByteBuffer decryptedPayload = ByteBuffer.allocate(crypto.getMaxOutputSize(payloadBuf.remaining()));
+        crypto.decrypt(() -> msgMetadata, payloadBuf, decryptedPayload, reader);
 
         // try to uncompress
         CompressionCodec codec = CompressionCodecProvider.getCompressionCodec(compressionType);
-        ByteBuf uncompressedPayload = codec.decode(decryptedPayload, uncompressedSize);
+        ByteBuf uncompressedPayload = codec.decode(Unpooled.wrappedBuffer(decryptedPayload), uncompressedSize);
 
         if (batchSize > 0) {
             SingleMessageMetadata singleMessageMetadata = new SingleMessageMetadata();

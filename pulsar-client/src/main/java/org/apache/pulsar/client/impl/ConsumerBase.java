@@ -780,8 +780,8 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
             return;
         }
 
+        reentrantLock.lock();
         try {
-            reentrantLock.lock();
             notifyPendingBatchReceivedCallBack(opBatchReceive);
         } finally {
             reentrantLock.unlock();
@@ -967,6 +967,10 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
 
     public long getIncomingMessageSize() {
         return INCOMING_MESSAGES_SIZE_UPDATER.get(this);
+    }
+
+    public int getTotalIncomingMessages() {
+        return incomingMessages.size();
     }
 
     protected void clearIncomingMessages() {

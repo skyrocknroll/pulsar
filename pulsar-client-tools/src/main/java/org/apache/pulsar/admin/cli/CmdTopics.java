@@ -28,7 +28,6 @@ import com.beust.jcommander.converters.CommaParameterSplitter;
 import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonObject;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
@@ -37,15 +36,14 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.client.admin.LongRunningProcessStatus;
+import org.apache.pulsar.client.admin.OffloadProcessStatus;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.admin.Topics;
@@ -54,19 +52,22 @@ import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.BatchMessageIdImpl;
 import org.apache.pulsar.client.impl.MessageIdImpl;
+import org.apache.pulsar.client.impl.MessageImpl;
+import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.policies.data.DelayedDeliveryPolicies;
 import org.apache.pulsar.common.policies.data.DispatchRate;
 import org.apache.pulsar.common.policies.data.InactiveTopicDeleteMode;
 import org.apache.pulsar.common.policies.data.InactiveTopicPolicies;
-import org.apache.pulsar.common.policies.data.OffloadPolicies;
-import org.apache.pulsar.common.policies.data.OffloadPolicies.OffloadedReadPriority;
+import org.apache.pulsar.common.policies.data.OffloadPoliciesImpl;
+import org.apache.pulsar.common.policies.data.OffloadedReadPriority;
 import org.apache.pulsar.common.policies.data.PersistencePolicies;
 import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats;
 import org.apache.pulsar.common.policies.data.PublishRate;
 import org.apache.pulsar.common.policies.data.RetentionPolicies;
 import org.apache.pulsar.common.policies.data.SubscribeRate;
+import org.apache.pulsar.common.util.DateFormatter;
 import org.apache.pulsar.common.util.RelativeTimeUtil;
 
 @Parameters(commandDescription = "Operations on persistent topics")
@@ -84,6 +85,7 @@ public class CmdTopics extends CmdBase {
         jcommander.addCommand("partitioned-lookup", new PartitionedLookup());
         jcommander.addCommand("bundle-range", new GetBundleRange());
         jcommander.addCommand("delete", new DeleteCmd());
+        jcommander.addCommand("truncate", new TruncateCmd());
         jcommander.addCommand("unload", new UnloadCmd());
         jcommander.addCommand("subscriptions", new ListSubscriptions());
         jcommander.addCommand("unsubscribe", new DeleteSubscription());
@@ -112,6 +114,7 @@ public class CmdTopics extends CmdBase {
         jcommander.addCommand("peek-messages", new PeekMessages());
         jcommander.addCommand("examine-messages", new ExamineMessages());
         jcommander.addCommand("get-message-by-id", new GetMessageById());
+        jcommander.addCommand("get-message-id", new GetMessageId());
         jcommander.addCommand("reset-cursor", new ResetCursor());
         jcommander.addCommand("terminate", new Terminate());
         jcommander.addCommand("compact", new Compact());
@@ -221,6 +224,8 @@ public class CmdTopics extends CmdBase {
         jcommander.addCommand("set-subscribe-rate", new SetSubscribeRate());
         jcommander.addCommand("remove-subscribe-rate", new RemoveSubscribeRate());
 
+        jcommander.addCommand("set-replicated-subscription-status", new SetReplicatedSubscriptionStatus());
+
         initDeprecatedCommands();
     }
 
@@ -248,19 +253,22 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Get the list of topics under a namespace.")
     private class ListCmd extends CliCommand {
-        @Parameter(description = "tenant/namespace\n", required = true)
+        @Parameter(description = "tenant/namespace", required = true)
         private java.util.List<String> params;
+
+        @Parameter(names = {"-td", "--topic-domain"}, description = "Allowed topic domain (persistent, non_persistent).")
+        private TopicDomain topicDomain;
 
         @Override
         void run() throws PulsarAdminException {
             String namespace = validateNamespace(params);
-            print(getTopics().getList(namespace));
+            print(getTopics().getList(namespace, topicDomain));
         }
     }
 
     @Parameters(commandDescription = "Get the list of partitioned topics under a namespace.")
     private class PartitionedTopicListCmd extends CliCommand {
-        @Parameter(description = "tenant/namespace\n", required = true)
+        @Parameter(description = "tenant/namespace", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -288,10 +296,10 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Revoke permissions on a topic \n "
-            + "\t\t\t   Revoke permissions to a client role on a single topic. If the permission \n"
-            + "\t\t\t   was not set at the topic level, but rather at the namespace level, this \n"
-            + "\t\t\t   operation will return an error (HTTP status code 412).")
+    @Parameters(commandDescription = "Revoke permissions on a topic. "
+            + "Revoke permissions to a client role on a single topic. If the permission "
+            + "was not set at the topic level, but rather at the namespace level, this "
+            + "operation will return an error (HTTP status code 412).")
     private class RevokePermissions extends CliCommand {
         @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
@@ -306,12 +314,12 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Get the permissions on a topic\n"
-            + "\t\t     Retrieve the effective permissions for a topic. These permissions are defined \n"
-            + "\t\t     by the permissions set at the namespace level combined (union) with any eventual \n"
-            + "\t\t     specific permission set on the topic.")
+    @Parameters(commandDescription = "Get the permissions on a topic. "
+            + "Retrieve the effective permissions for a topic. These permissions are defined "
+            + "by the permissions set at the namespace level combined (union) with any eventual "
+            + "specific permission set on the topic.")
     private class Permissions extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -323,7 +331,7 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Lookup a topic from the current serving broker")
     private class Lookup extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -335,7 +343,7 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Lookup a partitioned topic from the current serving broker")
     private class PartitionedLookup extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/partitionedTopic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/partitionedTopic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -347,7 +355,7 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Get Namespace bundle range of a topic")
     private class GetBundleRange extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -357,11 +365,11 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Create a partitioned topic. \n"
-            + "\t\tThe partitioned topic has to be created before creating a producer on it.")
+    @Parameters(commandDescription = "Create a partitioned topic. "
+            + "The partitioned topic has to be created before creating a producer on it.")
     private class CreatePartitionedCmd extends CliCommand {
 
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-p",
@@ -375,12 +383,12 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Try to create partitions for partitioned topic. \n"
-            + "\t\t     The partitions of partition topic has to be created, can be used by repair partitions when \n"
-            + "\t\t     topic auto creation is disabled")
+    @Parameters(commandDescription = "Try to create partitions for partitioned topic. "
+            + "The partitions of partition topic has to be created, can be used by repair partitions when "
+            + "topic auto creation is disabled")
     private class CreateMissedPartitionsCmd extends CliCommand {
 
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -393,7 +401,7 @@ public class CmdTopics extends CmdBase {
     @Parameters(commandDescription = "Create a non-partitioned topic.")
     private class CreateNonPartitionedCmd extends CliCommand {
 
-    	@Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+    	@Parameter(description = "persistent://tenant/namespace/topic", required = true)
     	private java.util.List<String> params;
 
     	@Override
@@ -403,11 +411,11 @@ public class CmdTopics extends CmdBase {
     	}
     }
 
-    @Parameters(commandDescription = "Update existing non-global partitioned topic. \n"
-            + "\t\tNew updating number of partitions must be greater than existing number of partitions.")
+    @Parameters(commandDescription = "Update existing non-global partitioned topic. "
+            + "New updating number of partitions must be greater than existing number of partitions.")
     private class UpdatePartitionedCmd extends CliCommand {
 
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-p",
@@ -421,11 +429,11 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Get the partitioned topic metadata. \n"
-            + "\t\tIf the topic is not created or is a non-partitioned topic, it returns empty topic with 0 partitions")
+    @Parameters(commandDescription = "Get the partitioned topic metadata. "
+            + "If the topic is not created or is a non-partitioned topic, it returns empty topic with 0 partitions")
     private class GetPartitionedTopicMetadataCmd extends CliCommand {
 
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -435,11 +443,11 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Delete a partitioned topic. \n"
-            + "\t\tIt will also delete all the partitions of the topic if it exists.")
+    @Parameters(commandDescription = "Delete a partitioned topic. "
+            + "It will also delete all the partitions of the topic if it exists.")
     private class DeletePartitionedCmd extends CliCommand {
 
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-f",
@@ -460,10 +468,10 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Delete a topic. \n"
-            + "\t\tThe topic cannot be deleted if there's any active subscription or producers connected to it.")
+    @Parameters(commandDescription = "Delete a topic. "
+            + "The topic cannot be deleted if there's any active subscription or producers connected to it.")
     private class DeleteCmd extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-f",
@@ -484,9 +492,22 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Unload a topic. \n")
-    private class UnloadCmd extends CliCommand {
+    @Parameters(commandDescription = "Truncate a topic. \n"
+            + "\t\tThe truncate operation will move all cursors to the end of the topic and delete all inactive ledgers. ")
+    private class TruncateCmd extends CliCommand {
         @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        private java.util.List<String> params;
+
+        @Override
+        void run() throws PulsarAdminException {
+            String topic = validateTopicName(params);
+            getTopics().truncate(topic);
+        }
+    }
+
+    @Parameters(commandDescription = "Unload a topic.")
+    private class UnloadCmd extends CliCommand {
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -498,7 +519,7 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Get the list of subscriptions on the topic")
     private class ListSubscriptions extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -508,8 +529,8 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Delete a durable subscriber from a topic. \n"
-            + "\t\tThe subscription cannot be deleted if there are any active consumers attached to it \n")
+    @Parameters(commandDescription = "Delete a durable subscriber from a topic. "
+            + "The subscription cannot be deleted if there are any active consumers attached to it")
     private class DeleteSubscription extends CliCommand {
         @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
@@ -528,10 +549,10 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Get the stats for the topic and its connected producers and consumers. \n"
-            + "\t       All the rates are computed over a 1 minute window and are relative the last completed 1 minute period.")
+    @Parameters(commandDescription = "Get the stats for the topic and its connected producers and consumers. "
+            + "All the rates are computed over a 1 minute window and are relative the last completed 1 minute period.")
     private class GetStats extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-gpb",
@@ -552,7 +573,7 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Get the internal stats for the topic")
     private class GetInternalStats extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-m",
@@ -568,22 +589,22 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Get the internal metadata info for the topic")
     private class GetInternalInfo extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
         void run() throws PulsarAdminException {
             String topic = validateTopicName(params);
-            JsonObject result = getTopics().getInternalInfo(topic);
+            String result = getTopics().getInternalInfo(topic);
             Gson gson = new GsonBuilder().setPrettyPrinting().create();
             System.out.println(gson.toJson(result));
         }
     }
 
-    @Parameters(commandDescription = "Get the stats for the partitioned topic and its connected producers and consumers. \n"
-            + "\t       All the rates are computed over a 1 minute window and are relative the last completed 1 minute period.")
+    @Parameters(commandDescription = "Get the stats for the partitioned topic and its connected producers and consumers. "
+            + "All the rates are computed over a 1 minute window and are relative the last completed 1 minute period.")
     private class GetPartitionedStats extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = "--per-partition", description = "Get per partition stats")
@@ -605,10 +626,10 @@ public class CmdTopics extends CmdBase {
         }
     }
 
-    @Parameters(commandDescription = "Get the internal stats for the partitioned topic and its connected producers and consumers. \n"
-            + "\t       All the rates are computed over a 1 minute window and are relative the last completed 1 minute period.")
+    @Parameters(commandDescription = "Get the internal stats for the partitioned topic and its connected producers and consumers. "
+            + "All the rates are computed over a 1 minute window and are relative the last completed 1 minute period.")
     private class GetPartitionedStatsInternal extends CliCommand {
-        @Parameter(description = "persistent://tenant/namespace/topic\n", required = true)
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Override
@@ -817,18 +838,36 @@ public class CmdTopics extends CmdBase {
             List<Message<byte[]>> messages = getTopics().peekMessages(persistentTopic, subName, numMessages);
             int position = 0;
             for (Message<byte[]> msg : messages) {
+                MessageImpl message = (MessageImpl) msg;
                 if (++position != 1) {
                     System.out.println("-------------------------------------------------------------------------\n");
                 }
-                if (msg.getMessageId() instanceof BatchMessageIdImpl) {
-                    BatchMessageIdImpl msgId = (BatchMessageIdImpl) msg.getMessageId();
+                if (message.getMessageId() instanceof BatchMessageIdImpl) {
+                    BatchMessageIdImpl msgId = (BatchMessageIdImpl) message.getMessageId();
                     System.out.println("Batch Message ID: " + msgId.getLedgerId() + ":" + msgId.getEntryId() + ":" + msgId.getBatchIndex());
                 } else {
                     MessageIdImpl msgId = (MessageIdImpl) msg.getMessageId();
                     System.out.println("Message ID: " + msgId.getLedgerId() + ":" + msgId.getEntryId());
                 }
-                if (msg.getProperties().size() > 0) {
-                    System.out.println("Tenants:");
+
+                System.out.println("Publish time: " + message.getPublishTime());
+                System.out.println("Event time: " + message.getEventTime());
+
+                if (message.getDeliverAtTime() != 0) {
+                    System.out.println("Deliver at time: " + message.getDeliverAtTime());
+                }
+
+                if (message.getBrokerEntryMetadata() != null) {
+                    if (message.getBrokerEntryMetadata().hasBrokerTimestamp()) {
+                        System.out.println("Broker entry metadata timestamp: " + message.getBrokerEntryMetadata().getBrokerTimestamp());
+                    }
+                    if (message.getBrokerEntryMetadata().hasIndex()) {
+                        System.out.println("Broker entry metadata index: " + message.getBrokerEntryMetadata().getIndex());
+                    }
+                }
+
+                if (message.getProperties().size() > 0) {
+                    System.out.println("Properties:");
                     print(msg.getProperties());
                 }
                 ByteBuf data = Unpooled.wrappedBuffer(msg.getData());
@@ -894,8 +933,44 @@ public class CmdTopics extends CmdBase {
                 System.out.println("Cannot find any messages based on ledgerId:"
                         + ledgerId + " entryId:" + entryId);
             } else {
+                if (message.getMessageId() instanceof BatchMessageIdImpl) {
+                    BatchMessageIdImpl msgId = (BatchMessageIdImpl) message.getMessageId();
+                    System.out.println("Batch Message ID: " + msgId.getLedgerId() + ":" + msgId.getEntryId() + ":" + msgId.getBatchIndex());
+                } else {
+                    MessageIdImpl msgId = (MessageIdImpl) message.getMessageId();
+                    System.out.println("Message ID: " + msgId.getLedgerId() + ":" + msgId.getEntryId());
+                }
+                if (message.getProperties().size() > 0) {
+                    System.out.println("Properties:");
+                    print(message.getProperties());
+                }
                 ByteBuf date = Unpooled.wrappedBuffer(message.getData());
                 System.out.println(ByteBufUtil.prettyHexDump(date));
+            }
+        }
+    }
+
+    @Parameters(commandDescription = "Get message ID")
+    private class GetMessageId extends CliCommand {
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
+        private java.util.List<String> params;
+
+        @Parameter(names = { "-d", "--datetime" },
+                description = "datetime at or before this messageId. This datetime is in format of ISO_OFFSET_DATE_TIME,"
+                        + " e.g. 2021-06-28T16:53:08Z or 2021-06-28T16:53:08.123456789+08:00",
+                required = true)
+        private String datetime;
+
+        @Override
+        void run() throws PulsarAdminException {
+            String persistentTopic = validatePersistentTopic(params);
+
+            long timestamp = DateFormatter.parse(datetime);
+            MessageId messageId = getTopics().getMessageIdByTimestamp(persistentTopic, timestamp);
+            if (messageId == null) {
+                System.out.println("Cannot find any messages based on timestamp " + timestamp);
+            } else {
+                print(messageId);
             }
         }
     }
@@ -1019,13 +1094,13 @@ public class CmdTopics extends CmdBase {
             String persistentTopic = validatePersistentTopic(params);
 
             try {
-                LongRunningProcessStatus status = getTopics().offloadStatus(persistentTopic);
-                while (wait && status.status == LongRunningProcessStatus.Status.RUNNING) {
+                OffloadProcessStatus status = getTopics().offloadStatus(persistentTopic);
+                while (wait && status.getStatus() == LongRunningProcessStatus.Status.RUNNING) {
                     Thread.sleep(1000);
                     status = getTopics().offloadStatus(persistentTopic);
                 }
 
-                switch (status.status) {
+                switch (status.getStatus()) {
                 case NOT_RUN:
                     System.out.println("Offload has not been run for " + persistentTopic
                                        + " since broker startup");
@@ -1038,7 +1113,7 @@ public class CmdTopics extends CmdBase {
                     break;
                 case ERROR:
                     System.out.println("Error in offload");
-                    throw new PulsarAdminException("Error offloading: " + status.lastError);
+                    throw new PulsarAdminException("Error offloading: " + status.getLastError());
                 }
             } catch (InterruptedException e) {
                 throw new PulsarAdminException(e);
@@ -1081,6 +1156,9 @@ public class CmdTopics extends CmdBase {
         @Parameter(names = { "-l", "--limit" }, description = "Size limit (eg: 10M, 16G)", required = true)
         private String limitStr;
 
+        @Parameter(names = { "-lt", "--limitTime" }, description = "Time limit in second, non-positive number for disabling time limit.")
+        private int limitTime = -1;
+
         @Parameter(names = { "-p", "--policy" }, description = "Retention policy to enforce when the limit is reached. "
                 + "Valid options are: [producer_request_hold, producer_exception, consumer_backlog_eviction]", required = true)
         private String policyStr;
@@ -1100,7 +1178,11 @@ public class CmdTopics extends CmdBase {
             limit = validateSizeString(limitStr);
 
             String persistentTopic = validatePersistentTopic(params);
-            getTopics().setBacklogQuota(persistentTopic, new BacklogQuota(limit, policy));
+            getTopics().setBacklogQuota(persistentTopic, BacklogQuota.builder()
+                    .limitSize(limit)
+                    .limitTime(limitTime)
+                    .retentionPolicy(policy)
+                    .build());
         }
     }
 
@@ -1119,7 +1201,7 @@ public class CmdTopics extends CmdBase {
 
     @Parameters(commandDescription = "Get the delayed delivery policy for a topic")
     private class GetDelayedDelivery extends CliCommand {
-        @Parameter(description = "tenant/namespace/topic\n", required = true)
+        @Parameter(description = "tenant/namespace/topic", required = true)
         private java.util.List<String> params;
 
         @Parameter(names = { "-ap", "--applied" }, description = "Get the applied policy of the topic")
@@ -1156,7 +1238,10 @@ public class CmdTopics extends CmdBase {
                 throw new ParameterException("Need to specify either --enable or --disable");
             }
 
-            getTopics().setDelayedDeliveryPolicy(topicName, new DelayedDeliveryPolicies(delayedDeliveryTimeInMills, enable));
+            getTopics().setDelayedDeliveryPolicy(topicName, DelayedDeliveryPolicies.builder()
+                    .tickTime(delayedDeliveryTimeInMills)
+                    .active(enable)
+                    .build());
         }
     }
 
@@ -1467,12 +1552,22 @@ public class CmdTopics extends CmdBase {
                 , description = "AWS Credential Secret to use when using driver S3 or aws-s3")
         private String awsSecret;
 
-        @Parameter(names = {"-m", "--maxBlockSizeInBytes"}
-                , description = "ManagedLedger offload max block Size in bytes, s3 and google-cloud-storage requires this parameter")
+        @Parameter(names = {"--ro", "--s3-role"}
+                , description = "S3 Role used for STSAssumeRoleSessionCredentialsProvider")
+        private String s3Role;
+
+        @Parameter(names = {"--s3-role-session-name", "-rsn"}
+                , description = "S3 role session name used for STSAssumeRoleSessionCredentialsProvider")
+        private String s3RoleSessionName;
+
+        @Parameter(names = {"-m", "--maxBlockSizeInBytes"},
+                description = "ManagedLedger offload max block Size in bytes,"
+                + "s3 and google-cloud-storage requires this parameter")
         private int maxBlockSizeInBytes;
 
-        @Parameter(names = {"-rb", "--readBufferSizeInBytes"}
-                , description = "ManagedLedger offload read buffer size in bytes, s3 and google-cloud-storage requires this parameter")
+        @Parameter(names = {"-rb", "--readBufferSizeInBytes"},
+                description = "ManagedLedger offload read buffer size in bytes,"
+                + "s3 and google-cloud-storage requires this parameter")
         private int readBufferSizeInBytes;
 
         @Parameter(names = {"-t", "--offloadThresholdInBytes"}
@@ -1494,22 +1589,25 @@ public class CmdTopics extends CmdBase {
         void run() throws PulsarAdminException {
             String persistentTopic = validatePersistentTopic(params);
 
-            OffloadedReadPriority offloadedReadPriority = OffloadPolicies.DEFAULT_OFFLOADED_READ_PRIORITY;
+            OffloadedReadPriority offloadedReadPriority = OffloadPoliciesImpl.DEFAULT_OFFLOADED_READ_PRIORITY;
 
             if (this.offloadReadPriorityStr != null) {
                 try {
                     offloadedReadPriority = OffloadedReadPriority.fromString(this.offloadReadPriorityStr);
                 } catch (Exception e) {
-                    throw new ParameterException("--offloadedReadPriority parameter must be one of " +
-                            Arrays.stream(OffloadedReadPriority.values())
+                    throw new ParameterException("--offloadedReadPriority parameter must be one of "
+                            + Arrays.stream(OffloadedReadPriority.values())
                                     .map(OffloadedReadPriority::toString)
                                     .collect(Collectors.joining(","))
                             + " but got: " + this.offloadReadPriorityStr, e);
                 }
             }
 
-            OffloadPolicies offloadPolicies = OffloadPolicies.create(driver, region, bucket, endpoint, awsId, awsSecret, maxBlockSizeInBytes
-                    , readBufferSizeInBytes, offloadThresholdInBytes, offloadDeletionLagInMillis, offloadedReadPriority);
+            OffloadPoliciesImpl offloadPolicies = OffloadPoliciesImpl.create(driver, region, bucket, endpoint,
+                    s3Role, s3RoleSessionName,
+                    awsId, awsSecret,
+                    maxBlockSizeInBytes,
+                    readBufferSizeInBytes, offloadThresholdInBytes, offloadDeletionLagInMillis, offloadedReadPriority);
 
             getTopics().setOffloadPolicies(persistentTopic, offloadPolicies);
         }
@@ -1577,26 +1675,31 @@ public class CmdTopics extends CmdBase {
         private java.util.List<String> params;
 
         @Parameter(names = { "--msg-dispatch-rate",
-                "-md" }, description = "message-dispatch-rate (default -1 will be overwrite if not passed)\n", required = false)
+                "-md" }, description = "message-dispatch-rate (default -1 will be overwrite if not passed)", required = false)
         private int msgDispatchRate = -1;
 
         @Parameter(names = { "--byte-dispatch-rate",
-                "-bd" }, description = "byte-dispatch-rate (default -1 will be overwrite if not passed)\n", required = false)
+                "-bd" }, description = "byte-dispatch-rate (default -1 will be overwrite if not passed)", required = false)
         private long byteDispatchRate = -1;
 
         @Parameter(names = { "--dispatch-rate-period",
-                "-dt" }, description = "dispatch-rate-period in second type (default 1 second will be overwrite if not passed)\n", required = false)
+                "-dt" }, description = "dispatch-rate-period in second type (default 1 second will be overwrite if not passed)", required = false)
         private int dispatchRatePeriodSec = 1;
 
         @Parameter(names = { "--relative-to-publish-rate",
-                "-rp" }, description = "dispatch rate relative to publish-rate (if publish-relative flag is enabled then broker will apply throttling value to (publish-rate + dispatch rate))\n", required = false)
+                "-rp" }, description = "dispatch rate relative to publish-rate (if publish-relative flag is enabled then broker will apply throttling value to (publish-rate + dispatch rate))", required = false)
         private boolean relativeToPublishRate = false;
 
         @Override
         void run() throws PulsarAdminException {
             String persistentTopic = validatePersistentTopic(params);
             getTopics().setDispatchRate(persistentTopic,
-                new DispatchRate(msgDispatchRate, byteDispatchRate, dispatchRatePeriodSec, relativeToPublishRate));
+                    DispatchRate.builder()
+                            .dispatchThrottlingRateInMsg(msgDispatchRate)
+                            .dispatchThrottlingRateInByte(byteDispatchRate)
+                            .ratePeriodInSecond(dispatchRatePeriodSec)
+                            .relativeToPublishRate(relativeToPublishRate)
+                            .build());
         }
     }
 
@@ -1790,11 +1893,11 @@ public class CmdTopics extends CmdBase {
         private java.util.List<String> params;
 
         @Parameter(names = { "--msg-publish-rate",
-            "-m" }, description = "message-publish-rate (default -1 will be overwrite if not passed)\n", required = false)
+            "-m" }, description = "message-publish-rate (default -1 will be overwrite if not passed)", required = false)
         private int msgPublishRate = -1;
 
          @Parameter(names = { "--byte-publish-rate",
-            "-b" }, description = "byte-publish-rate (default -1 will be overwrite if not passed)\n", required = false)
+            "-b" }, description = "byte-publish-rate (default -1 will be overwrite if not passed)", required = false)
         private long bytePublishRate = -1;
 
         @Override
@@ -1838,26 +1941,31 @@ public class CmdTopics extends CmdBase {
         private java.util.List<String> params;
 
         @Parameter(names = { "--msg-dispatch-rate",
-            "-md" }, description = "message-dispatch-rate (default -1 will be overwrite if not passed)\n", required = false)
+            "-md" }, description = "message-dispatch-rate (default -1 will be overwrite if not passed)", required = false)
         private int msgDispatchRate = -1;
 
         @Parameter(names = { "--byte-dispatch-rate",
-            "-bd" }, description = "byte-dispatch-rate (default -1 will be overwrite if not passed)\n", required = false)
+            "-bd" }, description = "byte-dispatch-rate (default -1 will be overwrite if not passed)", required = false)
         private long byteDispatchRate = -1;
 
         @Parameter(names = { "--dispatch-rate-period",
-            "-dt" }, description = "dispatch-rate-period in second type (default 1 second will be overwrite if not passed)\n", required = false)
+            "-dt" }, description = "dispatch-rate-period in second type (default 1 second will be overwrite if not passed)", required = false)
         private int dispatchRatePeriodSec = 1;
 
         @Parameter(names = { "--relative-to-publish-rate",
-                "-rp" }, description = "dispatch rate relative to publish-rate (if publish-relative flag is enabled then broker will apply throttling value to (publish-rate + dispatch rate))\n", required = false)
+                "-rp" }, description = "dispatch rate relative to publish-rate (if publish-relative flag is enabled then broker will apply throttling value to (publish-rate + dispatch rate))", required = false)
         private boolean relativeToPublishRate = false;
 
         @Override
         void run() throws PulsarAdminException {
             String persistentTopic = validatePersistentTopic(params);
             getTopics().setSubscriptionDispatchRate(persistentTopic,
-                    new DispatchRate(msgDispatchRate, byteDispatchRate, dispatchRatePeriodSec, relativeToPublishRate));
+                    DispatchRate.builder()
+                            .dispatchThrottlingRateInMsg(msgDispatchRate)
+                            .dispatchThrottlingRateInByte(byteDispatchRate)
+                            .ratePeriodInSecond(dispatchRatePeriodSec)
+                            .relativeToPublishRate(relativeToPublishRate)
+                            .build());
         }
     }
 
@@ -1894,26 +2002,31 @@ public class CmdTopics extends CmdBase {
         private java.util.List<String> params;
 
         @Parameter(names = { "--msg-dispatch-rate",
-            "-md" }, description = "message-dispatch-rate (default -1 will be overwrite if not passed)\n", required = false)
+            "-md" }, description = "message-dispatch-rate (default -1 will be overwrite if not passed)", required = false)
         private int msgDispatchRate = -1;
 
         @Parameter(names = { "--byte-dispatch-rate",
-            "-bd" }, description = "byte-dispatch-rate (default -1 will be overwrite if not passed)\n", required = false)
+            "-bd" }, description = "byte-dispatch-rate (default -1 will be overwrite if not passed)", required = false)
         private long byteDispatchRate = -1;
 
         @Parameter(names = { "--dispatch-rate-period",
-            "-dt" }, description = "dispatch-rate-period in second type (default 1 second will be overwrite if not passed)\n", required = false)
+            "-dt" }, description = "dispatch-rate-period in second type (default 1 second will be overwrite if not passed)", required = false)
         private int dispatchRatePeriodSec = 1;
 
         @Parameter(names = { "--relative-to-publish-rate",
-                "-rp" }, description = "dispatch rate relative to publish-rate (if publish-relative flag is enabled then broker will apply throttling value to (publish-rate + dispatch rate))\n", required = false)
+                "-rp" }, description = "dispatch rate relative to publish-rate (if publish-relative flag is enabled then broker will apply throttling value to (publish-rate + dispatch rate))", required = false)
         private boolean relativeToPublishRate = false;
 
         @Override
         void run() throws PulsarAdminException {
             String persistentTopic = validatePersistentTopic(params);
             getTopics().setReplicatorDispatchRate(persistentTopic,
-                    new DispatchRate(msgDispatchRate, byteDispatchRate, dispatchRatePeriodSec, relativeToPublishRate));
+                    DispatchRate.builder()
+                            .dispatchThrottlingRateInMsg(msgDispatchRate)
+                            .dispatchThrottlingRateInByte(byteDispatchRate)
+                            .ratePeriodInSecond(dispatchRatePeriodSec)
+                            .relativeToPublishRate(relativeToPublishRate)
+                            .build());
         }
     }
 
@@ -2217,11 +2330,11 @@ public class CmdTopics extends CmdBase {
         private java.util.List<String> params;
 
         @Parameter(names = { "--subscribe-rate",
-                "-sr" }, description = "subscribe-rate (default -1 will be overwrite if not passed)\n", required = false)
+                "-sr" }, description = "subscribe-rate (default -1 will be overwrite if not passed)", required = false)
         private int subscribeRate = -1;
 
         @Parameter(names = { "--subscribe-rate-period",
-                "-st" }, description = "subscribe-rate-period in second type (default 30 second will be overwrite if not passed)\n", required = false)
+                "-st" }, description = "subscribe-rate-period in second type (default 30 second will be overwrite if not passed)", required = false)
         private int subscribeRatePeriodSec = 30;
 
         @Override
@@ -2241,6 +2354,31 @@ public class CmdTopics extends CmdBase {
         void run() throws PulsarAdminException {
             String persistentTopic = validatePersistentTopic(params);
             getTopics().removeSubscribeRate(persistentTopic);
+        }
+    }
+
+    @Parameters(commandDescription = "Enable or disable a replicated subscription on a topic")
+    private class SetReplicatedSubscriptionStatus extends CliCommand {
+        @Parameter(description = "persistent://tenant/namespace/topic", required = true)
+        private java.util.List<String> params;
+
+        @Parameter(names = { "-s",
+                "--subscription" }, description = "Subscription name to enable or disable replication", required = true)
+        private String subName;
+
+        @Parameter(names = { "--enable", "-e" }, description = "Enable replication")
+        private boolean enable = false;
+
+        @Parameter(names = { "--disable", "-d" }, description = "Disable replication")
+        private boolean disable = false;
+
+        @Override
+        void run() throws PulsarAdminException {
+            String persistentTopic = validatePersistentTopic(params);
+            if (enable == disable) {
+                throw new ParameterException("Need to specify either --enable or --disable");
+            }
+            getTopics().setReplicatedSubscriptionStatus(persistentTopic, subName, enable);
         }
     }
 

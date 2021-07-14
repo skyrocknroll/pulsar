@@ -42,6 +42,7 @@ import io.netty.buffer.Unpooled;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.Clock;
@@ -680,13 +681,6 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         }
 
         try {
-            pulsarClient.newProducer().maxPendingMessages(0);
-            Assert.fail("should fail");
-        } catch (IllegalArgumentException e) {
-            // ok
-        }
-
-        try {
             pulsarClient.newProducer().topic("invalid://topic").create();
             Assert.fail("should fail");
         } catch (PulsarClientException e) {
@@ -1035,7 +1029,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         msg = subscriber1.receive(RECEIVE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
         // Verify: as active-subscriber2 has not consumed messages: EntryCache must have those entries in cache
-        assertTrue(entryCache.getSize() != 0);
+        Awaitility.await().untilAsserted(() -> assertNotEquals(entryCache.getSize(), 0));
 
         // 3.b Close subscriber2: which will trigger cache to clear the cache
         subscriber2.close();
@@ -3076,9 +3070,10 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         String encAlgo = encryptionCtx.getAlgorithm();
         int batchSize = encryptionCtx.getBatchSize().orElse(0);
 
-        ByteBuf payloadBuf = Unpooled.wrappedBuffer(msg.getData());
+        ByteBuffer payloadBuf = ByteBuffer.wrap(msg.getData());
         // try to decrypt use default MessageCryptoBc
-        @SuppressWarnings("rawtypes") MessageCrypto crypto = new MessageCryptoBc("test", false);
+        MessageCrypto<MessageMetadata, MessageMetadata> crypto =
+                new MessageCryptoBc("test", false);
 
         MessageMetadata messageMetadata = new MessageMetadata()
                 .setEncryptionParam(encrParam)
@@ -3094,11 +3089,12 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
             messageMetadata.setEncryptionAlgo(encAlgo);
         }
 
-        ByteBuf decryptedPayload = crypto.decrypt(() -> messageMetadata, payloadBuf, reader);
+        ByteBuffer decryptedPayload = ByteBuffer.allocate(crypto.getMaxOutputSize(payloadBuf.remaining()));
+        crypto.decrypt(() -> messageMetadata, payloadBuf, decryptedPayload, reader);
 
         // try to uncompress
         CompressionCodec codec = CompressionCodecProvider.getCompressionCodec(compressionType);
-        ByteBuf uncompressedPayload = codec.decode(decryptedPayload, uncompressedSize);
+        ByteBuf uncompressedPayload = codec.decode(Unpooled.wrappedBuffer(decryptedPayload), uncompressedSize);
 
         if (batchSize > 0) {
             SingleMessageMetadata singleMessageMetadata = new SingleMessageMetadata();
@@ -3460,8 +3456,8 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         Consumer<byte[]> consumer2 = consumerBuilder.subscribe();
 
         AtomicInteger consumer1Count = new AtomicInteger(0);
-        admin.topics().getPartitionedStats(topicName, true).partitions.forEach((p, stats) -> {
-            String activeConsumerName = stats.subscriptions.entrySet().iterator().next().getValue().activeConsumerName;
+        admin.topics().getPartitionedStats(topicName, true).getPartitions().forEach((p, stats) -> {
+            String activeConsumerName = stats.getSubscriptions().entrySet().iterator().next().getValue().getActiveConsumerName();
             if (activeConsumerName.equals("aaa")) {
                 consumer1Count.incrementAndGet();
             }
@@ -3480,9 +3476,9 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         retryStrategically((test) -> {
             try {
                 Map<String, Integer> subsCount = Maps.newHashMap();
-                admin.topics().getPartitionedStats(topicName, true).partitions.forEach((p, stats) -> {
-                    String activeConsumerName = stats.subscriptions.entrySet().iterator().next()
-                            .getValue().activeConsumerName;
+                admin.topics().getPartitionedStats(topicName, true).getPartitions().forEach((p, stats) -> {
+                    String activeConsumerName = stats.getSubscriptions().entrySet().iterator().next()
+                            .getValue().getActiveConsumerName();
                     subsCount.compute(activeConsumerName, (k, v) -> v != null ? v + 1 : 1);
                 });
                 return subsCount.size() == 3 && subsCount.get("bbb1").equals(evenDistributionCount)
@@ -3496,8 +3492,8 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         }, 5, 100);
 
         Map<String, Integer> subsCount = Maps.newHashMap();
-        admin.topics().getPartitionedStats(topicName, true).partitions.forEach((p, stats) -> {
-            String activeConsumerName = stats.subscriptions.entrySet().iterator().next().getValue().activeConsumerName;
+        admin.topics().getPartitionedStats(topicName, true).getPartitions().forEach((p, stats) -> {
+            String activeConsumerName = stats.getSubscriptions().entrySet().iterator().next().getValue().getActiveConsumerName();
             subsCount.compute(activeConsumerName, (k, v) -> v != null ? v + 1 : 1);
         });
         assertEquals(subsCount.size(), 3);
@@ -3865,7 +3861,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
             producer.sendAsync("msg" + i);
         }
         //Give some time to consume
-        Awaitility.await().atMost(5, TimeUnit.SECONDS)
+        Awaitility.await()
                 .untilAsserted(() -> Assert.assertEquals(consumer.getStats().getMsgNumInReceiverQueue().intValue(), receiveQueueSize));
         consumer.close();
         producer.close();
@@ -3894,7 +3890,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
             producer.sendAsync("msg" + i);
         }
         //Give some time to consume
-        Awaitility.await().atMost(5, TimeUnit.SECONDS)
+        Awaitility.await()
                 .untilAsserted(() -> Assert.assertEquals(consumer.getStats().getMsgNumInReceiverQueue().intValue(), receiveQueueSize));
         consumer.close();
         producer.close();
@@ -3933,7 +3929,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         }
         FutureUtil.waitForAll(messageIds).get();
 
-        Awaitility.await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
+        Awaitility.await().untilAsserted(() -> {
             long size = ((ConsumerBase<byte[]>) consumer).getIncomingMessageSize();
             log.info("Check the incoming message size should greater that 0, current size is {}", size);
             Assert.assertTrue(size > 0);
@@ -3943,7 +3939,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
             consumer.acknowledge(consumer.receive(RECEIVE_TIMEOUT_SECONDS, TimeUnit.SECONDS));
         }
 
-        Awaitility.await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
+        Awaitility.await().untilAsserted(() -> {
             long size = ((ConsumerBase<byte[]>) consumer).getIncomingMessageSize();
             log.info("Check the incoming message size should be 0, current size is {}", size);
             Assert.assertEquals(size, 0);
@@ -4053,6 +4049,27 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
             }
         }
         assertEquals(1, res.getFields().size());
+    }
+
+    @Test
+    public void testTopicDoesNotExists() throws Exception {
+        cleanup();
+        conf.setAllowAutoTopicCreation(false);
+        setup();
+        String topic = "persistent://my-property/my-ns/none" + UUID.randomUUID();
+        admin.topics().createPartitionedTopic(topic, 3);
+        try {
+            @Cleanup
+            Consumer<byte[]> consumer = pulsarClient.newConsumer()
+                    .enableRetry(true)
+                    .topic(topic).subscriptionName("sub").subscribe();
+            fail("should fail");
+        } catch (Exception e) {
+            String retryTopic = topic + "-sub-RETRY";
+            assertTrue(e.getMessage().contains("Topic " + retryTopic + " does not exist"));
+        } finally {
+            conf.setAllowAutoTopicCreation(true);
+        }
     }
 
     /**
