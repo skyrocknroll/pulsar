@@ -49,7 +49,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import javax.annotation.Nonnull;
 import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.core.Response;
@@ -151,6 +150,7 @@ import org.apache.pulsar.common.util.collections.BitSetRecyclable;
 import org.apache.pulsar.compaction.Compactor;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.transaction.coordinator.TransactionCoordinatorID;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -357,7 +357,7 @@ public class PersistentTopicsBase extends AdminResource {
      * @exception RestException Unprocessable entity, status code: 422. throw it when some pre-check failed.
      * @exception RestException Internal Server Error, status code: 500. throw it when get unknown Exception
      */
-    protected @Nonnull CompletableFuture<Void> internalUpdatePartitionedTopicAsync(int expectPartitions,
+    protected @NonNull CompletableFuture<Void> internalUpdatePartitionedTopicAsync(int expectPartitions,
                                                                                    boolean updateLocal,
                                                                                    boolean force) {
         PulsarService pulsarService = pulsar();
@@ -3304,6 +3304,16 @@ public class PersistentTopicsBase extends AdminResource {
                                                               BacklogQuotaImpl backlogQuota, boolean isGlobal) {
         BacklogQuota.BacklogQuotaType finalBacklogQuotaType = backlogQuotaType == null
                 ? BacklogQuota.BacklogQuotaType.destination_storage : backlogQuotaType;
+        try {
+            // Null value means delete backlog quota.
+            if (backlogQuota != null) {
+                backlogQuota.validate();
+            }
+        } catch (IllegalArgumentException e) {
+            RestException restException = new RestException(Status.BAD_REQUEST, String.format("Set namespace[%s]"
+                + " backlog quota failed because the data validation failed. %s", namespaceName, e.getMessage()));
+            return CompletableFuture.failedFuture(restException);
+        }
 
         return validatePoliciesReadOnlyAccessAsync()
                 .thenCompose(__ -> getTopicPoliciesAsyncWithRetry(topicName, isGlobal))
@@ -4976,7 +4986,7 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void handleTopicPolicyException(String methodName, Throwable thr, AsyncResponse asyncResponse) {
         Throwable cause = thr.getCause();
-        if (isNot307And404Exception(cause)) {
+        if (isNot307And404And400Exception(cause)) {
             log.error("[{}] Failed to perform {} on topic {}",
                     clientAppId(), methodName, topicName, cause);
         }

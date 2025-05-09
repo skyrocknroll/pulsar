@@ -24,7 +24,6 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.bookkeeper.mledger.ManagedLedgerConfig.PROPERTY_SOURCE_TOPIC_KEY;
 import static org.apache.commons.collections4.CollectionUtils.isEmpty;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
-import static org.apache.pulsar.broker.admin.impl.BrokersBase.internalRunHealthCheck;
 import static org.apache.pulsar.client.util.RetryMessageUtil.DLQ_GROUP_TOPIC_SUFFIX;
 import static org.apache.pulsar.client.util.RetryMessageUtil.RETRY_GROUP_TOPIC_SUFFIX;
 import static org.apache.pulsar.common.naming.SystemTopicNames.isTransactionInternalName;
@@ -81,8 +80,6 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -197,6 +194,8 @@ import org.apache.pulsar.opentelemetry.OpenTelemetryAttributes.ConnectionRateLim
 import org.apache.pulsar.opentelemetry.annotations.PulsarDeprecatedMetric;
 import org.apache.pulsar.policies.data.loadbalancer.NamespaceBundleStats;
 import org.apache.pulsar.transaction.coordinator.TransactionMetadataStore;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -204,10 +203,6 @@ import org.slf4j.LoggerFactory;
 @Setter(AccessLevel.PROTECTED)
 public class BrokerService implements Closeable {
     private static final Logger log = LoggerFactory.getLogger(BrokerService.class);
-    private static final Duration FUTURE_DEADLINE_TIMEOUT_DURATION = Duration.ofSeconds(60);
-    private static final TimeoutException FUTURE_DEADLINE_TIMEOUT_EXCEPTION =
-            FutureUtil.createTimeoutException("Future didn't finish within deadline", BrokerService.class,
-                    "futureWithDeadline(...)");
     private static final TimeoutException FAILED_TO_LOAD_TOPIC_TIMEOUT_EXCEPTION =
             FutureUtil.createTimeoutException("Failed to load topic within timeout", BrokerService.class,
                     "futureWithDeadline(...)");
@@ -324,7 +319,6 @@ public class BrokerService implements Closeable {
     private Channel listenChannel;
     private Channel listenChannelTls;
 
-    private boolean preciseTopicPublishRateLimitingEnable;
     private BrokerInterceptor interceptor;
     private final EntryFilterProvider entryFilterProvider;
     private TopicFactory topicFactory;
@@ -340,8 +334,6 @@ public class BrokerService implements Closeable {
         this.clock = pulsar.getClock();
         this.dynamicConfigurationMap = prepareDynamicConfigurationMap();
         this.brokerPublishRateLimiter = new PublishRateLimiterImpl(pulsar.getMonotonicClock());
-        this.preciseTopicPublishRateLimitingEnable =
-                pulsar.getConfiguration().isPreciseTopicPublishRateLimiterEnable();
         this.dispatchRateLimiterFactory = createDispatchRateLimiterFactory(pulsar.getConfig());
         this.managedLedgerStorage = pulsar.getManagedLedgerStorage();
         this.keepAliveIntervalSeconds = pulsar.getConfiguration().getKeepAliveIntervalSeconds();
@@ -679,7 +671,10 @@ public class BrokerService implements Closeable {
     }
 
     public CompletableFuture<Void> checkHealth() {
-        return internalRunHealthCheck(TopicVersion.V2, pulsar(), null).thenAccept(__ -> {
+        if (!pulsar().isRunning()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return pulsar().runHealthCheck(TopicVersion.V2, null).thenAccept(__ -> {
             this.pulsarStats.getBrokerOperabilityMetrics().recordHealthCheckStatusSuccess();
         }).exceptionally(ex -> {
             this.pulsarStats.getBrokerOperabilityMetrics().recordHealthCheckStatusFail();
@@ -819,6 +814,10 @@ public class BrokerService implements Closeable {
     public CompletableFuture<Void> closeAsync() {
         try {
             log.info("Shutting down Pulsar Broker service");
+
+            // unregister non-static metrics collectors
+            pendingTopicLoadRequests.unregister();
+            pendingLookupRequests.unregister();
 
             // unloads all namespaces gracefully without disrupting mutually
             unloadNamespaceBundlesGracefully();
@@ -1223,7 +1222,7 @@ public class BrokerService implements Closeable {
         }
     }
 
-    private CompletableFuture<Optional<TopicPolicies>> getTopicPoliciesBypassSystemTopic(@Nonnull TopicName topicName) {
+    private CompletableFuture<Optional<TopicPolicies>> getTopicPoliciesBypassSystemTopic(@NonNull TopicName topicName) {
         if (ExtensibleLoadManagerImpl.isInternalTopic(topicName.toString())) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
@@ -1947,14 +1946,14 @@ public class BrokerService implements Closeable {
         return result;
     }
 
-    public CompletableFuture<ManagedLedgerConfig> getManagedLedgerConfig(@Nonnull TopicName topicName) {
+    public CompletableFuture<ManagedLedgerConfig> getManagedLedgerConfig(@NonNull TopicName topicName) {
         final CompletableFuture<Optional<TopicPolicies>> topicPoliciesFuture =
                 getTopicPoliciesBypassSystemTopic(topicName);
         return topicPoliciesFuture.thenCompose(optionalTopicPolicies ->
                 getManagedLedgerConfig(topicName, optionalTopicPolicies.orElse(null)));
     }
 
-    private CompletableFuture<ManagedLedgerConfig> getManagedLedgerConfig(@Nonnull TopicName topicName,
+    private CompletableFuture<ManagedLedgerConfig> getManagedLedgerConfig(@NonNull TopicName topicName,
                                                                           @Nullable TopicPolicies topicPolicies) {
         requireNonNull(topicName);
         NamespaceName namespace = topicName.getNamespaceObject();
@@ -3614,7 +3613,7 @@ public class BrokerService implements Closeable {
         return null;
     }
 
-    public @Nonnull CompletableFuture<Boolean> isAllowAutoSubscriptionCreationAsync(@Nonnull TopicName tpName) {
+    public @NonNull CompletableFuture<Boolean> isAllowAutoSubscriptionCreationAsync(@NonNull TopicName tpName) {
         requireNonNull(tpName);
         // Policies priority: topic level -> namespace level -> broker level
         if (ExtensibleLoadManagerImpl.isInternalTopic(tpName.toString())) {
