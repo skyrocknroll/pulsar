@@ -933,14 +933,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean isAllowAutoUpdateSchemaEnabled = true;
 
     @FieldContext(
-            category = CATEGORY_SERVER,
-            doc = "Whether to enable the automatic shrink of pendingAcks map, "
-                    + "the default is false, which means it is not enabled. "
-                    + "When there are a large number of share or key share consumers in the cluster, "
-                    + "it can be enabled to reduce the memory consumption caused by pendingAcks.")
-    private boolean autoShrinkForConsumerPendingAcksMap = false;
-
-    @FieldContext(
         category = CATEGORY_SERVER,
         dynamic = true,
         doc = "Enable check for minimum allowed client library version"
@@ -1041,11 +1033,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
                     + "it uses more CPU to perform frequent check. (Disable publish throttling with value 0)"
         )
     private int topicPublisherThrottlingTickTimeMillis = 10;
-    @FieldContext(
-            category = CATEGORY_SERVER,
-            doc = "Enable precise rate limit for topic publish"
-    )
-    private boolean preciseTopicPublishRateLimiterEnable = false;
 
     @FieldContext(
         category = CATEGORY_SERVER,
@@ -1478,13 +1465,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
             + " Use -1 to disable the memory limitation. Default is 1/2 of direct memory.\n\n")
     private int maxMessagePublishBufferSizeInMB = Math.max(64,
         (int) (DirectMemoryUtils.jvmMaxDirectMemory() / 2 / (1024 * 1024)));
-
-    @FieldContext(
-        category = CATEGORY_SERVER,
-        doc = "Interval between checks to see if message publish buffer size is exceed the max message publish "
-                + "buffer size"
-    )
-    private int messagePublishBufferCheckIntervalInMillis = 100;
 
     @FieldContext(category = CATEGORY_SERVER, doc = "Whether to recover cursors lazily when trying to recover a "
             + "managed ledger backing a persistent topic. It can improve write availability of topics.\n"
