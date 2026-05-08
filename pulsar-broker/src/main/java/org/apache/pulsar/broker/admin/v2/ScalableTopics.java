@@ -26,6 +26,7 @@ import io.swagger.annotations.ApiResponses;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -174,9 +175,8 @@ public class ScalableTopics extends AdminResource {
                     Map<String, String> props = properties != null ? properties : Map.of();
                     ScalableTopicMetadata metadata = ScalableTopicController.createInitialMetadata(
                             numInitialSegments, props);
-                    // Segment persistent topics are auto-created on demand when clients connect,
-                    // so we only need to store the metadata here.
-                    return resources().createScalableTopicAsync(tn, metadata);
+                    return resources().createScalableTopicAsync(tn, metadata)
+                            .thenCompose(ignored -> createInitialSegmentTopicsAsync(tn, metadata));
                 })
                 .thenAccept(__ -> {
                     log.info().attr("clientAppId", clientAppId()).attr("topic", tn)
@@ -196,6 +196,35 @@ public class ScalableTopics extends AdminResource {
                     }
                     return null;
                 });
+    }
+
+    /**
+     * Create the backing persistent topic for each segment in the initial layout.
+     *
+     * <p>Segment topics are NEVER auto-created on client connect (see
+     * {@code BrokerService.isAllowAutoTopicCreationAsync}); they only come into
+     * existence through the controller's explicit-create path. So at scalable-topic
+     * creation time we have to materialize the initial segment(s) up front, before
+     * any producer or consumer arrives.
+     *
+     * <p>Routes via the internal admin client so each segment's create lands on
+     * its bundle's owning broker (segment bundles can hash to a different broker
+     * than the one handling this REST call).
+     */
+    private CompletableFuture<Void> createInitialSegmentTopicsAsync(
+            TopicName parentTopic, ScalableTopicMetadata metadata) {
+        try {
+            var admin = pulsar().getAdminClient();
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            for (SegmentInfo seg : metadata.getSegments().values()) {
+                String segmentTopic = SegmentTopicName.fromParent(
+                        parentTopic, seg.hashRange(), seg.segmentId()).toString();
+                futures.add(admin.scalableTopics().createSegmentAsync(segmentTopic, List.of()));
+            }
+            return FutureUtil.waitForAll(futures);
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
     // --- Get metadata ---
