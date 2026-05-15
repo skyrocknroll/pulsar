@@ -152,7 +152,10 @@ public class MetadataTransactionBuffer implements TransactionBuffer {
 
             @Override
             public void onError(Throwable throwable) {
-                // Future propagation handled by listWritesBySegment's returned future.
+                // Recovery still fails loudly via the scan's returned future and the terminal
+                // whenComplete below; logging here captures the cause with segment context.
+                log.warn().attr("segment", segmentName).exception(throwable)
+                        .log("TB recovery scan errored");
             }
 
             @Override
@@ -261,7 +264,7 @@ public class MetadataTransactionBuffer implements TransactionBuffer {
 
     private CompletableFuture<Position> recordOp(TxnID txnId, String txnIdKey, Position position) {
         TxnOp op = new TxnOp(TxnOpKind.WRITE, segmentName, null,
-                position.getLedgerId(), position.getEntryId());
+                position.getLedgerId(), position.getEntryId(), null);
         return txnStore.appendOp(txnIdKey, op).thenApply(stat -> {
             synchronized (lock) {
                 TxnEntry entry = txns.get(txnIdKey);
