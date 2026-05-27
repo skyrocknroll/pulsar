@@ -3796,6 +3796,17 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean transactionCoordinatorEnabled = false;
 
     @FieldContext(
+            category = CATEGORY_TRANSACTION,
+            doc = "Enable the metadata-driven transaction coordinator used by scalable topics."
+                    + " When true, wire commands (NEW_TXN / END_TXN / etc.) are served by the"
+                    + " metadata-store-backed coordinator instead of the legacy"
+                    + " TransactionMetadataStoreService. Requires transactionCoordinatorEnabled"
+                    + " = true, and must be enabled together with the scalable-topic transaction"
+                    + " buffer and pending-ack store providers."
+    )
+    private boolean transactionCoordinatorScalableTopicsEnabled = false;
+
+    @FieldContext(
         category = CATEGORY_TRANSACTION,
             doc = "Class name for transaction metadata store provider"
     )
