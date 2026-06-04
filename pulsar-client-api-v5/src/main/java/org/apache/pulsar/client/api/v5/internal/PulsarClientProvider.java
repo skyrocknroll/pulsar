@@ -27,6 +27,7 @@ import org.apache.pulsar.client.api.v5.MessageId;
 import org.apache.pulsar.client.api.v5.PulsarClientBuilder;
 import org.apache.pulsar.client.api.v5.PulsarClientException;
 import org.apache.pulsar.client.api.v5.auth.Authentication;
+import org.apache.pulsar.client.api.v5.schema.GenericRecord;
 import org.apache.pulsar.client.api.v5.schema.Schema;
 
 /**
@@ -81,6 +82,8 @@ public interface PulsarClientProvider {
     Schema<?> genericSchema(org.apache.pulsar.client.api.v5.schema.SchemaInfo schemaInfo);
 
     Schema<byte[]> autoProduceBytesSchema(Schema<?> base);
+
+    Schema<GenericRecord> autoConsumeSchema();
 
     // --- Checkpoint ---
 
