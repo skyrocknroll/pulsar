@@ -272,9 +272,13 @@ public class TransactionCoordinatorV5Test {
 
     @Test
     public void sweepTimeouts_abortsExpiredOpenTxnAndFansOut() throws Exception {
-        // 1ms timeout → deadline already in the past when the sweep runs.
+        // Wait until the positive timeout has actually expired before running the sweep.
         TxnID txnId = tc.newTransaction(TC_ID, 1L, "owner").get();
         String txnIdKey = TxnIds.toKey(txnId);
+        TxnHeader openHeader = txnStore.getHeader(txnIdKey).get().orElseThrow().value();
+        long deadlineMs = openHeader.getCreatedAt().toEpochMilli() + openHeader.getTimeout().toMillis();
+        Awaitility.await().until(() -> System.currentTimeMillis() >= deadlineMs);
+
         String segment = "segment://public/default/topic/0000-ffff-0";
         txnStore.appendOp(txnIdKey,
                 new TxnOp(TxnOpKind.WRITE, segment, null, 5L, 1L, null)).get();
