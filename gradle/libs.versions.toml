@@ -66,13 +66,15 @@ snakeyaml = "2.0"
 # Vert.x
 vertx = "4.5.28"
 # Networking / HTTP
-asynchttpclient = "2.15.0"
+asynchttpclient = "3.0.10"
 conscrypt = "2.5.2"
 okhttp3 = "5.3.2"
 okio = "3.17.0"
 netty-tcnative = "2.0.77.Final"
 httpcomponents-httpclient = "4.5.14"
 httpcomponents-httpcore = "4.4.16"
+# Pinned so that async-http-client's 1.0.3 dependency does not downgrade it
+reactive-streams = "1.0.4"
 # Google libraries (transitive deps)
 opentelemetry-gcp-resources = "1.57.0-alpha"
 # Data structures / Utils
@@ -354,6 +356,7 @@ okio-bom = { module = "com.squareup.okio:okio-bom", version.ref = "okio" }
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
 # Transitive dep version pins (enforced by pulsar-dependencies platform)
 httpcomponents-httpclient = { module = "org.apache.httpcomponents:httpclient", version.ref = "httpcomponents-httpclient" }
+reactive-streams = { module = "org.reactivestreams:reactive-streams", version.ref = "reactive-streams" }
 httpcomponents-httpcore = { module = "org.apache.httpcomponents:httpcore", version.ref = "httpcomponents-httpcore" }
 jakarta-annotation-api = { module = "jakarta.annotation:jakarta.annotation-api", version.ref = "jakarta-annotation" }
 snakeyaml = { module = "org.yaml:snakeyaml", version.ref = "snakeyaml" }
