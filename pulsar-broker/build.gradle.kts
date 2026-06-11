@@ -221,6 +221,10 @@ lightproto {
 // The plugin's default `swaggerDeps` resolver dependencies target javax.ws.rs; declaring
 // our own dependencies on the configuration replaces them with the jakarta variants.
 dependencies {
+    // The component metadata rule in pulsar.java-conventions replaces
+    // com.sun.activation:jakarta.activation with versionless jakarta.activation-api/
+    // angus-activation deps, so swaggerDeps needs the platform to pin their versions.
+    "swaggerDeps"(enforcedPlatform(project(":pulsar-dependencies")))
     "swaggerDeps"(libs.commons.lang3)
     "swaggerDeps"(libs.swagger.jaxrs2)
     "swaggerDeps"(libs.jakarta.ws.rs.api)
@@ -254,12 +258,15 @@ registerSwaggerTask("swaggerAdminV2", "swagger", "admin-v2.json") {
         "org.apache.pulsar.broker.admin.v2.Brokers",
         "org.apache.pulsar.broker.admin.v2.Clusters",
         "org.apache.pulsar.broker.admin.v2.Functions",
+        "org.apache.pulsar.broker.admin.v2.MetadataMigration",
         "org.apache.pulsar.broker.admin.v2.Namespaces",
         "org.apache.pulsar.broker.admin.v2.NonPersistentTopics",
         "org.apache.pulsar.broker.admin.v2.PersistentTopics",
         "org.apache.pulsar.broker.admin.v2.ResourceGroups",
         "org.apache.pulsar.broker.admin.v2.ResourceQuotas",
+        "org.apache.pulsar.broker.admin.v2.ScalableTopics",
         "org.apache.pulsar.broker.admin.v2.SchemasResource",
+        "org.apache.pulsar.broker.admin.v2.Segments",
         "org.apache.pulsar.broker.admin.v2.Tenants",
         "org.apache.pulsar.broker.admin.v2.Worker",
         "org.apache.pulsar.broker.admin.v2.WorkerStats",
