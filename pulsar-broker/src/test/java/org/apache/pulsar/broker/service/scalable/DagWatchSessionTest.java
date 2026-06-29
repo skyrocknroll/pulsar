@@ -32,6 +32,7 @@ import static org.testng.Assert.fail;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -465,7 +466,8 @@ public class DagWatchSessionTest {
                 sealedAt,
                 createdAtMs,
                 sealedAtMs,
-                null);
+                null,
+                List.of());
     }
 
     private static java.util.List<Long> toList(long[] arr) {
